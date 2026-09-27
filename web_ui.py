@@ -141,6 +141,12 @@ _selfcheck_state = {"result": None, "lock": threading.Lock()}
 
 def run_selfcheck(force: bool = False) -> dict:
     """跑一遍环境自检（Python 版本、依赖包、分辨率/缩放/权限等运行环境）。"""
+    # 分辨率检测（缓存）：自检的分辨率项与坐标映射层共用同一来源。
+    try:
+        import layout
+        layout.auto_detect()
+    except Exception:
+        pass
     with _selfcheck_state["lock"]:
         cached = _selfcheck_state["result"]
     if cached is not None and not force:
@@ -215,6 +221,9 @@ def api_selfcheck(force: bool = True) -> dict:
 def api_regions() -> dict:
     """截一张屏幕并画出所有截图区域框（只截图，不点击、不移动鼠标）。"""
     try:
+        # 画框位置与脚本实际使用的坐标保持同源：先启用分辨率映射。
+        import layout
+        layout.auto_detect()
         result = screen_regions.build_region_preview()
     except Exception as exc:
         traceback.print_exc()
@@ -1212,6 +1221,9 @@ def _overlay_toggle_calibrate():
     """
     try:
         import region_overlay
+        # 校准框要与脚本实际使用的坐标一致：先按当前主屏启用分辨率映射。
+        import layout
+        layout.auto_detect()
     except Exception as exc:
         _log("WARN", f"截图区域框不可用：{exc}")
         return False

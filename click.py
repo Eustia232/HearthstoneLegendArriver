@@ -11,7 +11,18 @@ from contextlib import contextmanager
 from constants.constants import *
 from print_info import *
 from get_screen import *
-from config import human_like_settings
+from config import human_like_settings, timeline_positions
+import layout
+
+
+def _pt(x, y):
+    """1920×1080 参考坐标 → 当前屏幕坐标（经 layout 映射）。
+
+    1920×1080 全屏 + 100% 缩放时映射为恒等，行为与旧版逐像素一致；
+    其他分辨率按棋盘等比缩放换算（见 layout.py）。left_click 自带的
+    ±2px 抖动在映射之后施加。
+    """
+    return layout.map_point(x, y)
 
 
 #测试不同分辨率的点击效果，因为屏幕截取未支持不同分辨率，失败了
@@ -96,10 +107,10 @@ def _random_hand_hover_point(last=None):
     """
     for _ in range(8):
         size = random.randint(*HAND_HOVER_SIZES)
-        point = (random.choice(HAND_CARD_X[size]), HAND_HOVER_Y)
+        point = _pt(random.choice(HAND_CARD_X[size]), HAND_HOVER_Y)
         if point != last:
             return point
-    return (960, HAND_HOVER_Y)
+    return _pt(960, HAND_HOVER_Y)
 
 
 def human_like_pause(mouse=None, settings=None):
@@ -177,7 +188,7 @@ def click_button(x, y, button, require_hearthstone=True):
         # The first physical click on a background Unity window can be
         # consumed solely to activate it. Activate via the same harmless
         # right-side point used by cancel_click, then send the real action.
-        activate_x, activate_y = 1800, 500
+        activate_x, activate_y = _pt(1800, 500)
         _send_physical_click(
             mouse, activate_x, activate_y, Button.right)
         rand_sleep(0.25)
@@ -197,8 +208,7 @@ def right_click(x, y, require_hearthstone=True):
 def choose_my_board_entity(entity_index, entity_num):
     rand_sleep(OPERATE_INTERVAL)
     x = 960 - (entity_num - 1) * 70 + entity_index * 140
-    y = 600
-    left_click(x, y)
+    left_click(*_pt(x, 600))
 
 
 def choose_my_minion(mine_index, mine_num):
@@ -207,29 +217,28 @@ def choose_my_minion(mine_index, mine_num):
 
 def choose_my_hero():
     rand_sleep(OPERATE_INTERVAL)
-    left_click(960, 850)
+    left_click(*_pt(960, 850))
 
 
 def choose_opponent_minion(oppo_index, oppo_num):
     rand_sleep(OPERATE_INTERVAL)
     x = 960 - (oppo_num - 1) * 70 + oppo_index * 140
-    y = 400
-    left_click(x, y)
+    left_click(*_pt(x, 400))
 
 
 def choose_oppo_hero():
     rand_sleep(OPERATE_INTERVAL)
-    left_click(960, 200)
+    left_click(*_pt(960, 200))
 
 
 def cancel_click():
     rand_sleep(TINY_OPERATE_INTERVAL)
-    right_click(1700, 400)
+    right_click(*_pt(1700, 400))
 
 
 def test_click():
     rand_sleep(TINY_OPERATE_INTERVAL)
-    left_click(1700, 400)
+    left_click(*_pt(1700, 400))
 
 
 HAND_CARD_X = [
@@ -254,8 +263,7 @@ def choose_card(card_index, card_num):
     # x = START[card_num] + 65 + STEP[card_num] * card_index
     x = HAND_CARD_X[card_num][card_index]
 
-    y = 1000
-    left_click(x, y)
+    left_click(*_pt(x, 1000))
 
 
 DISCOVER_CARD_X = {
@@ -274,7 +282,7 @@ def choose_discover_card(choice_index, choice_count):
     assert 0 <= choice_index < len(positions)
     rand_sleep(OPERATE_INTERVAL)
     y = 540 if choice_count == 1 else 500
-    left_click(positions[choice_index], y)
+    left_click(*_pt(positions[choice_index], y))
 
 
 STARTING_CARD_X = {
@@ -288,23 +296,23 @@ def replace_starting_card(card_index, hand_card_num):
     assert card_index < len(STARTING_CARD_X[hand_card_num])
 
     rand_sleep(OPERATE_INTERVAL)
-    left_click(STARTING_CARD_X[hand_card_num][card_index], 500)
+    left_click(*_pt(STARTING_CARD_X[hand_card_num][card_index], 500))
 
 
 def click_middle():
     rand_sleep(OPERATE_INTERVAL)
-    left_click(960, 500)
+    left_click(*_pt(960, 500))
 
 
 def click_setting():
     rand_sleep(OPERATE_INTERVAL)
-    left_click(1895, 1060)
+    left_click(*_pt(1895, 1060))
 
 
 def click_concede():
     """点击游戏菜单中央的红色“认输”按钮（1920x1080 实测坐标）。"""
     rand_sleep(OPERATE_INTERVAL)
-    left_click(960, 380)
+    left_click(*_pt(960, 380))
 
 
 def choose_and_use_spell(card_index, card_num):
@@ -318,12 +326,12 @@ def drag_card_to_board_entity(card_index, card_num, entity_index, entity_num):
     assert 0 <= entity_index < entity_num <= 7
 
     mouse = Controller()
-    mouse.position = (HAND_CARD_X[card_num][card_index], 1000)
+    mouse.position = _pt(HAND_CARD_X[card_num][card_index], 1000)
     rand_sleep(0.1)
     mouse.press(Button.left)
     try:
         board_x = 960 - (entity_num - 1) * 70 + entity_index * 140
-        mouse.position = (board_x - 25, 600)
+        mouse.position = _pt(board_x - 25, 600)
         rand_sleep(0.1)
     finally:
         mouse.release(Button.left)
@@ -337,58 +345,58 @@ def put_minion(gap_index, minion_num):
         warn_print(f"Try to put a minion but there has already been {minion_num} minions")
 
     x = 960 - (minion_num - 1) * 70 + 140 * gap_index - 70
-    y = 600
-    left_click(x, y)
+    left_click(*_pt(x, 600))
 
 
 def match_opponent():
     # 一些奇怪的错误提示
     commit_error_report()
     rand_sleep(OPERATE_INTERVAL)
-    left_click(1400, 900)
+    left_click(*_pt(1400, 900))
 
 
 def enter_battle_mode():
     # 一些奇怪的错误提示
     commit_error_report()
     rand_sleep(OPERATE_INTERVAL)
-    left_click(950, 320)
+    left_click(*_pt(950, 320))
 
 
 def commit_choose_card():
     rand_sleep(OPERATE_INTERVAL)
-    left_click(960, 850)
+    left_click(*_pt(960, 850))
 
 
 def end_turn():
     rand_sleep(OPERATE_INTERVAL)
-    left_click(1550, 500)
+    left_click(*_pt(1550, 500))
 
 
-# HSAng 左下「时间线」提示按钮中心（1920x1080 实测，见用户截图）：
-#   回溯(撤销) ≈ (351, 805)   维持(保留) ≈ (582, 805)
-TIMELINE_UNDO_POS = (351, 805)
-TIMELINE_KEEP_POS = (582, 805)
+# HSAng 左下「时间线」提示按钮：真实值经 config.timeline_positions() 读取
+# （默认为 1920x1080 实测值，可在 ui_config.json 覆盖）。这里是参考默认值，
+# 仅供兼容引用；点击走 timeline_positions()。
+TIMELINE_UNDO_POS = layout.TIMELINE_UNDO_POS
+TIMELINE_KEEP_POS = layout.TIMELINE_KEEP_POS
 
 
 def click_timeline_undo():
     """点 HSAng 左下「回溯」：撤销时间线里上一步操作。"""
     rand_sleep(OPERATE_INTERVAL)
-    x, y = TIMELINE_UNDO_POS
+    x, y = timeline_positions()[0]
     left_click(x, y)
 
 
 def click_timeline_keep():
     """点 HSAng 左下「维持」：保留当前操作、关掉时间线提示。"""
     rand_sleep(OPERATE_INTERVAL)
-    x, y = TIMELINE_KEEP_POS
+    x, y = timeline_positions()[1]
     left_click(x, y)
 
 
 def click_launch_starship():
     """Click the starship launch button at 1920x1080."""
     rand_sleep(OPERATE_INTERVAL)
-    left_click(1080, 920)
+    left_click(*_pt(1080, 920))
 
 
 def drag_card_to_deck():
@@ -402,7 +410,7 @@ def drag_card_to_deck():
     try:
         rand_sleep(0.1)
         # 我方牌库中心点(1920x1080 实测，用户量得 1635,640)。
-        mouse.position = (1635, 640)
+        mouse.position = _pt(1635, 640)
         rand_sleep(DECK_DROP_HOLD_INTERVAL)
     finally:
         mouse.release(Button.left)
@@ -410,14 +418,16 @@ def drag_card_to_deck():
 
 def commit_error_report():
     # 一些奇怪的错误提示
-    left_click(1100, 820)
+    left_click(*_pt(1100, 820))
     # 如果已断线, 点这里时取消
-    left_click(960, 650)
+    left_click(*_pt(960, 650))
 
 
 def emoj(target=None):
-    emoj_list = [(800, 880), (800, 780), (800, 680), (1150, 680), (1150, 780)]
-    right_click(960, 830)
+    emoj_list = [_pt(x, y) for x, y in
+                 ((800, 880), (800, 780), (800, 680),
+                  (1150, 680), (1150, 780))]
+    right_click(*_pt(960, 830))
     rand_sleep(OPERATE_INTERVAL)
 
     if target is None:
@@ -430,7 +440,7 @@ def emoj(target=None):
 
 def click_skill():
     rand_sleep(OPERATE_INTERVAL)
-    left_click(1150, 850)
+    left_click(*_pt(1150, 850))
 
 
 def use_skill_no_point():
@@ -476,28 +486,28 @@ def hero_beat_hero():
 def _choose_my_attacker(mine_index, mine_number):
     time.sleep(0.05)
     x = 960 - (mine_number - 1) * 70 + mine_index * 140
-    left_click(x, 600)
+    left_click(*_pt(x, 600))
 
 
 def _choose_my_hero_attacker():
     time.sleep(0.05)
-    left_click(960, 850)
+    left_click(*_pt(960, 850))
 
 
 def _choose_attack_target(oppo_index, oppo_num):
     time.sleep(0.05)
     x = 960 - (oppo_num - 1) * 70 + oppo_index * 140
-    left_click(x, 400)
+    left_click(*_pt(x, 400))
 
 
 def _choose_attack_target_hero():
     time.sleep(0.05)
-    left_click(960, 200)
+    left_click(*_pt(960, 200))
 
 
 def _finish_attack():
     time.sleep(0.05)
-    right_click(1700, 400)
+    right_click(*_pt(1700, 400))
 
 
 def enter_HS():

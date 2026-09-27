@@ -122,6 +122,77 @@ TINY_OPERATE_INTERVAL = float(_env("HS_TINY_OPERATE_INTERVAL", "0.08"))
 # 概率性失败——卡牌又弹回手牌，动作作废。经 HS_DECK_DROP_HOLD_INTERVAL 覆盖。
 DECK_DROP_HOLD_INTERVAL = float(_env("HS_DECK_DROP_HOLD_INTERVAL", "0.8"))
 
+# ---------------------------------------------------------------- 屏幕分辨率 / 坐标映射
+# 脚本所有 1920×1080 参考坐标的换算集中在 layout.py（坐标映射层）。
+# desktop_size 用于捕获帧校验与环境自检：
+#   * None（默认）＝自动检测主屏分辨率；
+#   * ui_config.json 写 "desktop_size": [w, h] 可显式指定（写错会被自检判 ❌）。
+# DPI 仍必须为 100%（96）：坐标换算全部基于物理像素，缩放非 100% 会整体偏移。
+def _user_desktop_size() -> Optional[tuple[int, int]]:
+    """读取用户显式指定的分辨率（ui_config.json 的 desktop_size）。"""
+    try:
+        size = _UI.get("desktop_size")
+        if size is None:
+            return None
+        vals = tuple(int(v) for v in size)
+        if len(vals) == 2 and vals[0] > 0 and vals[1] > 0:
+            return vals
+    except Exception:
+        pass
+    return None
+
+
+# ---------------------------------------------------------------- 盒子 UI 覆盖项
+# 盒子（HSAng）的屏幕元素位置取决于盒子窗口，与游戏分辨率无关，因此按桌面
+# 绝对像素使用（layout.ANCHOR_SCREEN）。默认值是 1920×1080 实测；盒子窗口
+# 挪过位置/大小的用户可在 ui_config.json 覆盖，避免自动投降/时间线失灵。
+def win_rate_regions() -> tuple[tuple[int, int, int, int],
+                                tuple[int, int, int, int]]:
+    """AI 胜率检测区域 (主区域, 兜底区域)；ui_config 的
+    ai_win_rate_roi / ai_win_rate_wide_roi 可覆盖（每次调用重读，改完即生效）。
+    """
+    import layout
+    main, wide = layout.AI_WIN_RATE_REGION, layout.AI_WIN_RATE_WIDE_REGION
+    try:
+        data = _load_ui_config()
+        for key in ("ai_win_rate_roi", "ai_win_rate_wide_roi"):
+            roi = data.get(key)
+            if not roi:
+                continue
+            vals = tuple(int(v) for v in roi)
+            if len(vals) == 4 and vals[0] < vals[2] and vals[1] < vals[3]:
+                if key == "ai_win_rate_roi":
+                    main = vals
+                else:
+                    wide = vals
+    except Exception:
+        pass
+    return (main, wide)
+
+
+def timeline_positions() -> tuple[tuple[int, int], tuple[int, int]]:
+    """HSAng「时间线」按钮坐标 (回溯, 维持)；ui_config 的
+    timeline_undo_pos / timeline_keep_pos 可覆盖（每次调用重读，改完即生效）。
+    """
+    import layout
+    undo, keep = layout.TIMELINE_UNDO_POS, layout.TIMELINE_KEEP_POS
+    try:
+        data = _load_ui_config()
+        pos = data.get("timeline_undo_pos")
+        if pos:
+            vals = tuple(int(v) for v in pos)
+            if len(vals) == 2:
+                undo = vals
+        pos = data.get("timeline_keep_pos")
+        if pos:
+            vals = tuple(int(v) for v in pos)
+            if len(vals) == 2:
+                keep = vals
+    except Exception:
+        pass
+    return (undo, keep)
+
+
 # ---------------------------------------------------------------- 自动投降默认值
 # 自动投降功能的默认配置（单一来源：Web 层与 FSM_action 层共用，避免各自硬编码）。
 # 真实值保存在 ui_config.json 的 auto_concede 段；这里只提供“没配置时”的兜底。
@@ -376,8 +447,11 @@ class RecommendationConfig:
     """
 
     # ------------------------------------------------------------------ 屏幕
-    # 分辨率必须与炉石传说一致（程序校验用），DPI 100%。
-    desktop_size: tuple[int, int] = (1920, 1080)
+    # 桌面分辨率（程序校验用），DPI 必须 100%（96）。
+    # None = 启动时自动检测主屏分辨率；ui_config.json 的 "desktop_size": [w, h]
+    # 可显式指定（写错会被环境自检判 ❌）。捕获帧校验用它比对实际截图尺寸。
+    # 点击/判定坐标的换算在 layout.py，与这里的校验值同源，任意分辨率一致。
+    desktop_size: Optional[tuple[int, int]] = None
     desktop_dpi: int = 96
 
     # 盒子面板完整区域（屏幕坐标 left, top, right, bottom）。
@@ -411,9 +485,10 @@ class RecommendationConfig:
     # 疯狂截图）。因此单独设一个默认 5s 的重试间隔，保证失败后的重试有退避。
     mulligan_retry_delay_seconds: float = 5.0
     # 换牌"确认"按钮区域（屏幕坐标 left, top, right, bottom）。
-    # 对齐 commit_choose_card 的点击点 (960,850)，以该点为中心外扩。
+    # 默认值对齐 commit_choose_card 的参考点击点 (960,850)，以该点为中心外扩；
+    # 它是游戏内元素，未校准时默认值会随分辨率经 layout 缩放（见 __post_init__）。
     # 点击确认后该按钮消失；仍能识别到"确认"说明换牌未提交成功，需重试。
-    # 可通过 ui_config.json 的 mulligan_confirm_roi 覆盖。
+    # 可通过 ui_config.json 的 mulligan_confirm_roi 覆盖（覆盖值为绝对像素）。
     mulligan_confirm_roi: tuple[int, int, int, int] = (860, 810, 1060, 890)
 
     # ------------------------------------------------------------------ 第一回合额外延时
@@ -460,13 +535,28 @@ class RecommendationConfig:
 
     def __post_init__(self) -> None:
         # 用户可覆盖项依次应用（代码默认 < ui_config.json）：
-        # 1) 推荐区域 ROI；2) 换牌确认按钮 ROI；3) 各延时。
+        # 1) 推荐区域 ROI（盒子面板=桌面绝对像素，不随分辨率缩放）；
+        # 2) 换牌确认按钮 ROI（游戏内元素，未校准时默认值经 layout 缩放）；
+        # 3) 各延时。
+        import layout
+
+        # desktop_size：显式指定 > ui_config 覆盖 > 自动检测主屏分辨率。
+        size = self.desktop_size or _user_desktop_size()
+        if size is None:
+            size = layout.detected_desktop_size()
+        object.__setattr__(self, "desktop_size", (int(size[0]), int(size[1])))
+
         roi = _user_roi()
         if roi is not None:
             object.__setattr__(self, "recommendation_roi", roi)
         confirm_roi = _user_confirm_roi()
         if confirm_roi is not None:
             object.__setattr__(self, "mulligan_confirm_roi", confirm_roi)
+        else:
+            # 未校准：确认按钮是游戏内元素，默认区域随分辨率等比缩放。
+            object.__setattr__(
+                self, "mulligan_confirm_roi",
+                layout.map_region(self.mulligan_confirm_roi))
         # 用户可在 ui_config.json 的 delays 段覆盖延时（默认采用上游时序）。
         for key, value in _user_delays().items():
             object.__setattr__(self, key, value)

@@ -9,8 +9,10 @@ import keyboard
 
 import click
 import get_screen
+import layout
 from config import (
     DEFAULT_AUTO_CONCEDE, SNAPSHOT_WRITE_INTERVAL, human_like_settings,
+    win_rate_regions,
 )
 from manual_controller import (
     ClickExecutor, GlobalHotkeyInput, ManualController,
@@ -266,6 +268,12 @@ def init():
     except Exception:
         pass
     shutdown_event.clear()
+    # 分辨率检测：所有 1920×1080 参考坐标经 layout 映射到当前主屏
+    # （1920×1080 全屏 = 恒等映射，行为不变；其他分辨率等比换算）。
+    _detected_layout = layout.auto_detect()
+    sys_print(f"[SYS] 屏幕分辨率 {_detected_layout.width}×"
+              f"{_detected_layout.height}，坐标缩放比 "
+              f"{_detected_layout.scale:.3f}（16:9 为精确支持）")
     initialize_recommendation_automation()
     click.center_mouse()
 
@@ -816,8 +824,11 @@ def confirm_button_present() -> bool:
 
 
 # ---------------------------------------------------------------- 自动投降检测
-# 盒子浮动条“AI胜率 X%”的截图区域（1920x1080 实测）：主区域 + 放宽的兜底区域。
-_AI_WIN_RATE_REGIONS = ((110, 8, 270, 48), (95, 0, 300, 60))
+# 盒子浮动条“AI胜率 X%”的检测区域：桌面绝对像素（盒子 UI 与游戏分辨率无关），
+# 默认为 1920×1080 实测值（layout），可在 ui_config.json 覆盖
+# （ai_win_rate_roi / ai_win_rate_wide_roi，经 config.win_rate_regions() 读取；
+# screen_regions.py 与本表同源，test_screen_regions.py 校验两边一致）。
+_AI_WIN_RATE_REGIONS = tuple(win_rate_regions())
 # 浮动条字号很小，放大后再送 OCR，识别率明显更高。
 _AI_WIN_RATE_SCALE = 2.0
 # 同一回合内 OCR 读不到时的重试次数与间隔：盒子浮动条常常要等面板画好才出现，
@@ -875,7 +886,7 @@ def read_ai_win_rate():
         from PIL import ImageGrab
     except Exception:
         return None
-    for index, box in enumerate(_AI_WIN_RATE_REGIONS):
+    for index, box in enumerate(win_rate_regions()):
         try:
             rgb = np.asarray(ImageGrab.grab(bbox=box, all_screens=False))
             img = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)

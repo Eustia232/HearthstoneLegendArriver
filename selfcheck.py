@@ -347,8 +347,47 @@ def _hearthstone_item() -> dict:
                  "没开也没关系：点「开始运行」会先拉起战网和炉石。", False, purpose)
 
 
+def _aspect_item(width: int, height: int) -> Optional[dict]:
+    """非 16:9 宽高比给 ⚠️：棋盘换算依赖“居中 + 等比”假设，未全量实测。"""
+    if not width or not height:
+        return None
+    if abs(width / height - 16 / 9) <= 0.02:
+        return None
+    return _item(
+        "aspect", "屏幕宽高比", STATUS_WARN,
+        f"{width}×{height} 不是 16:9（实验性支持）",
+        "16:9 分辨率（1920×1080 / 2560×1440 / 3840×2160…）为精确支持；"
+        "非 16:9 请用浮窗「校准」或网页「显示截图区域框」核对各框位置。",
+        False, "非 16:9 布局未全量实测")
+
+
+def _fullscreen_item() -> Optional[dict]:
+    """炉石窗口未铺满屏幕（窗口化/最大化窗口）时给 ⚠️：点击会整体错位。"""
+    try:
+        import ctypes
+        import win32gui
+        from get_screen import get_HS_hwnd
+        hwnd = int(get_HS_hwnd())
+        if not hwnd:
+            return None
+        user32 = ctypes.windll.user32
+        screen_w = int(user32.GetSystemMetrics(0))
+        screen_h = int(user32.GetSystemMetrics(1))
+        left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+    except Exception:
+        return None
+    if (right - left, bottom - top) == (screen_w, screen_h):
+        return None
+    return _item(
+        "fullscreen", "炉石显示模式", STATUS_WARN,
+        f"窗口 {right - left}×{bottom - top} ≠ 屏幕 {screen_w}×{screen_h}",
+        "炉石请用「全屏」显示模式（设置 → 选项 → 显示）：窗口化/最大化窗口时"
+        "窗口与全屏画面存在偏移，所有点击会整体错位。", False,
+        "窗口模式与全屏的坐标不一致")
+
+
 def environment_items(config=None) -> list[dict]:
-    """管理员权限 / 分辨率 / 缩放 / 炉石窗口 / 日志目录 / OCR 模型。"""
+    """管理员权限 / 分辨率 / 缩放 / 宽高比 / 全屏 / 炉石窗口 / 日志 / OCR 模型。"""
     config = config if config is not None else _config_handle()
 
     if _is_admin():
@@ -363,7 +402,7 @@ def environment_items(config=None) -> list[dict]:
 
     expected_w, expected_h = _expected_desktop_size(config)
     width, height = _current_screen_size()
-    purpose = "脚本点击坐标按这个分辨率硬编码"
+    purpose = "点击坐标按配置分辨率经 layout 等比换算"
     if width == 0 and height == 0:
         screen = _item("resolution", "屏幕分辨率", STATUS_WARN, "读取失败", "",
                        False, purpose)
@@ -374,8 +413,9 @@ def environment_items(config=None) -> list[dict]:
         screen = _item(
             "resolution", "屏幕分辨率", STATUS_FAIL,
             f"{width}×{height}（要求 {expected_w}×{expected_h}）",
-            "脚本的点击坐标按 1920×1080 硬编码：请把 Windows 分辨率设为 "
-            f"{expected_w}×{expected_h}，并用炉石全屏模式（不要用最大化窗口）。",
+            "实际分辨率与配置的 desktop_size 不一致：请把 Windows 分辨率设为 "
+            f"{expected_w}×{expected_h}，或把 ui_config.json 的 desktop_size "
+            "改成实际分辨率；炉石用全屏模式（不要用最大化窗口）。",
             True, purpose)
 
     expected_dpi = _expected_dpi(config)
@@ -394,8 +434,15 @@ def environment_items(config=None) -> list[dict]:
             "显示设置 → 缩放改成 100%：缩放不是 100% 时截图和点击都会整体偏移。",
             True, purpose)
 
-    return [admin, screen, scaling, _hearthstone_item(),
-            _log_dir_item(), _ocr_model_item()]
+    items = [admin, screen, scaling, _hearthstone_item(),
+             _log_dir_item(), _ocr_model_item()]
+    aspect = _aspect_item(width, height)
+    if aspect is not None:
+        items.append(aspect)
+    fullscreen = _fullscreen_item()
+    if fullscreen is not None:
+        items.append(fullscreen)
+    return items
 
 
 # ---------------------------------------------------------------- 总入口
