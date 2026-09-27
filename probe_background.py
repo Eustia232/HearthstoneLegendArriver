@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""炉石传说后台模式可行性探针 v3（通道自校验版）。
+"""炉石传说后台模式可行性探针 v3.1（纯后台版：通道自校验）。
 
 三轮实测的结论（详见 docs/background-probe.md 判读表）：
 1. 渲染不是瓶颈：前台/失焦/遮挡/幽灵透明的 idle 帧差同为 0.01~0.08，
@@ -20,7 +20,11 @@ v3 对策：把「确认状态、验证通道、容忍呈现延迟」做成**通
 
 用法（在有炉石的 Windows 机器上，管理员终端）：
     uv run --no-project python probe_background.py
-    uv run --no-project python probe_background.py --drag   # 追加拖牌探针（练习模式）
+    uv run --no-project python probe_background.py --drag   # 拖牌探针（练习模式）
+    uv run --no-project python probe_background.py --render # 复测渲染四状态（默认跳过）
+
+v3.1 变更：去掉前台对照（前台已两次实测通过且项目前台模式已适配）；
+渲染矩阵改 --render 可选；后台自校验回路是唯一裁决者。
 
 输出：probe_out/ 下的截图与 probe_report.json，回传方式见 docs/background-probe.md。
 win32 只在 Windows 分支导入，纯逻辑部分可在任意平台单测（tests/test_probe_background.py）。
@@ -295,28 +299,13 @@ def find_yellow_button(img: np.ndarray, y_min_ratio: float = 0.55,
 def compute_verdict(report: dict) -> dict:
     """按探针结果给出人读结论（纯函数，report 结构见各 run_* 函数）。
 
-    判定优先级：行为证据（自校验回路 > hover 响应 > 前台对照）优先于
-    参考信息（alive 帧差）。
+    v3.1 起无前台对照（前台已两次实测通过、项目前台模式已适配）：
+    后台自校验回路（开/关菜单双向多帧确认）是唯一裁决者，hover 响应
+    次之，alive 帧差仅参考。
     """
     caps = report.get("captures", {})
     pw = caps.get("printwindow", {})
     pw_ok = bool(pw.get("ok")) and not bool(pw.get("black", True))
-
-    fg_post = report.get("click_foreground", {}).get("post", {})
-    fg_flick = report.get("click_foreground", {}).get("post_flick", {})
-    fg_post_ok = bool(fg_post.get("open", {}).get("ok")) or (
-        fg_post.get("user_confirmed") is True)
-    fg_flick_ok = bool(fg_flick.get("open", {}).get("ok")) or (
-        fg_flick.get("user_confirmed") is True)
-    if fg_post_ok:
-        foreground_verdict = "前台：纯 PostMessage 合成点击被消费（最优）"
-        input_any = True
-    elif fg_flick_ok:
-        foreground_verdict = "前台：需要真实光标瞬移才被消费（游戏读真实光标）"
-        input_any = True
-    else:
-        foreground_verdict = "前台对照组失败：炉石不消费合成鼠标消息"
-        input_any = False
 
     def round_worked(value: dict | None) -> bool:
         return bool(value and value.get("open", {}).get("ok")
@@ -348,10 +337,8 @@ def compute_verdict(report: dict) -> dict:
     elif tickle_changed:
         capture_verdict = ("hover 有响应（后台截图会随输入刷新），"
                            "但开/关自校验回路未通过——看各轮 observe 明细")
-    elif input_any:
-        capture_verdict = "前台可用、后台开/关回路未通过——看各轮 observe 与截图"
     else:
-        capture_verdict = "后台回路未通过且前台对照也失败"
+        capture_verdict = "后台开/关自校验未通过且 hover 无响应"
 
     background_notes = {
         "post": "后台纯 PostMessage 可用：无感后台（最优）",
@@ -363,10 +350,9 @@ def compute_verdict(report: dict) -> dict:
     elif tickle_changed:
         background_verdict = ("自校验未通过但 hover 有响应：输入通道活着，"
                               "疑似残留菜单/状态机受扰，清理后重跑")
-    elif input_any:
-        background_verdict = "后台自校验未通过（前台对照通过）：重跑一次再定性"
     else:
-        background_verdict = "后台自校验未通过（前台对照也失败）"
+        background_verdict = ("后台自校验未通过且 hover 无响应：人工揭开炉石"
+                              "确认当前画面（是否大厅/有无残留面板）后重跑")
 
     esc_results = [v.get("keyboard_esc_ok") for v in click.values()
                    if isinstance(v, dict)]
@@ -383,18 +369,18 @@ def compute_verdict(report: dict) -> dict:
     elif best_transport:
         overall = "可行"
         overall_note = "后台输入+截图双向得证，可以进入后台后端实现"
-    elif input_any:
+    elif tickle_changed:
         overall = "有条件可行"
-        overall_note = "前台可用但后台自校验未过：排查残留菜单后重跑一轮再定性"
+        overall_note = "输入通道活着但自校验未过：清理残留面板后重跑一轮再定性"
     else:
         overall = "不可行"
-        overall_note = "合成鼠标消息不被消费，后台输入路线搁置"
+        overall_note = ("自校验回路与 hover 均无响应：先人工确认游戏画面状态，"
+                        "重跑仍全灭则后台输入路线搁置")
 
     return {
         "overall": overall,
         "overall_note": overall_note,
         "capture_verdict": capture_verdict,
-        "foreground_verdict": foreground_verdict,
         "background_verdict": background_verdict,
         "keyboard_verdict": keyboard_verdict,
         "rendering_note": rendering_note,
@@ -800,49 +786,6 @@ def _try_close_menu(hwnd: int, transport: str, baseline: np.ndarray | None,
     return close_result
 
 
-def foreground_input_probe(hwnd: int, out_dir: Path) -> dict:
-    """前台对照组：炉石在前台、手不离鼠标，测合成消息是否被消费。
-
-    若前台都不被消费 → Unity 丢弃合成消息，后台输入路线直接判死；
-    若前台可用 → 后台轮的失败才是「遮挡/状态」相关，值得继续攻关。
-    """
-    print("\n========== 前台输入对照组 ==========")
-    result: dict = {}
-    _wait_enter("F1 确认炉石在前台且完整可见；把光标移到【炉石窗口以外】"
-                "（桌面或 cmd 上）停住 → 按回车 → 之后手完全离开鼠标")
-    baseline = _capture_or_none(hwnd)
-    save_png(baseline, out_dir / "fg_baseline.png")
-    cw, ch = client_size(hwnd)
-    gx, gy = gear_point(cw, ch)
-    print(f"  目标：右下角齿轮（客户区 {gx},{gy}）。请在炉石上观察结果。")
-
-    for transport in ("post", "post_flick"):
-        click_at(hwnd, transport, gx, gy)
-        frames = observe_frames(hwnd, 3, 0.6)
-        obs = (observe_summary(baseline, frames)
-               if baseline is not None else {})
-        measured = bool(obs.get("changed"))
-        save_png(frames[0] if frames else None,
-                 out_dir / f"fg_{transport}_after.png")
-        confirmed = _ask(f"  [{transport}] max_diff={obs.get('max_diff')}。"
-                         "肉眼看到炉石弹出选项菜单了吗？(y/n) ").startswith("y")
-        entry = {
-            "transport": transport,
-            "observe": obs,
-            "measured_open": measured,
-            "user_confirmed": bool(confirmed),
-        }
-        if measured or confirmed:
-            print("  合成点击在前台生效！尝试自动关闭菜单…")
-            entry["close"] = _try_close_menu(hwnd, transport, baseline,
-                                             out_dir, f"fg_{transport}")
-            result[transport] = entry
-            break
-        result[transport] = entry
-        print(f"  [{transport}] 前台未生效。")
-    return result
-
-
 def _sweep_stuck_menu(hwnd: int, transport: str, out_dir: Path,
                       tag: str) -> dict | None:
     """开局清扫：若截图里发现黄色「完成」按钮（疑似菜单卡开），点击关闭并观察。
@@ -1058,7 +1001,6 @@ def print_summary(report: dict) -> None:
         print(f"hover-tickle：changed={tickle.get('changed')} "
               f"region_max={tickle.get('region_max_diff')}")
     print(f"截图/输入通道：{verdict['capture_verdict']}")
-    print(f"前台对照：{verdict['foreground_verdict']}")
     print(f"后台通道：{verdict['background_verdict']}")
     print(f"键盘：{verdict['keyboard_verdict']}")
     print(f"总体：{verdict['overall']} —— {verdict['overall_note']}")
@@ -1067,9 +1009,12 @@ def print_summary(report: dict) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     _ensure_windows()
-    parser = argparse.ArgumentParser(description="炉石后台模式可行性探针 v3")
+    parser = argparse.ArgumentParser(description="炉石后台模式可行性探针 v3.1")
     parser.add_argument("--drag", action="store_true",
                         help="追加拖牌探针（需先进练习模式）")
+    parser.add_argument("--render", action="store_true",
+                        help="追加渲染四状态矩阵（R1~R4，仅存档；默认跳过，"
+                             "两轮实测已证明四状态均在渲染）")
     parser.add_argument("--strategies", default=",".join(TRANSPORTS),
                         help="要测的后台点击策略，逗号分隔：post,send,post_flick")
     parser.add_argument("--out", default="probe_out", help="输出目录")
@@ -1094,11 +1039,12 @@ def main(argv: list[str] | None = None) -> int:
     if not meta["is_admin"]:
         print("[提示] 当前不是管理员权限：若炉石以管理员运行，消息注入会被系统拦截。")
 
-    report: dict = {"meta": meta, "captures": {}, "click_foreground": {},
+    report: dict = {"meta": meta, "captures": {},
                     "tickle_test": None, "click": {}, "drag": None}
 
     print("\n主菜单/大厅 = 登录后有「对战模式 / 竞技场 / 酒馆战棋」大按钮、"
           "右下角齿轮的界面。")
+    print("【重跑前置】上轮若有点开的界面/面板，先手动关掉、确认回到大厅。")
     _wait_enter("请先登录炉石并停在大厅，然后在这里按回车")
     ensure_main_menu(hwnd, out_dir)
 
@@ -1117,9 +1063,11 @@ def main(argv: list[str] | None = None) -> int:
     save_png(capture_window_dc(hwnd)[0], out_dir / "capture_window_dc.png")
     save_png(capture_desktop(), out_dir / "capture_desktop.png")
 
-    report["captures"]["rendering"] = rendering_probe(hwnd, out_dir)
-
-    report["click_foreground"] = foreground_input_probe(hwnd, out_dir)
+    if args.render:
+        report["captures"]["rendering"] = rendering_probe(hwnd, out_dir)
+    else:
+        print("\n（跳过渲染四状态矩阵：两轮实测已证明四状态均在渲染；"
+              "需要复测时加 --render）")
 
     _wait_enter("\n后台实验开始：请把 cmd 完全盖住炉石 → 回车")
     report["tickle_test"] = tickle_probe(hwnd, out_dir)
