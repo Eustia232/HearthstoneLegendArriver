@@ -1110,6 +1110,9 @@ def Battling():
     while True:
         if quitting_flag:
             sys.exit(0)
+        # 对局内分辨率看门狗：整局都在本循环里打转（外层主循环不执行），
+        # 中途改分辨率只能在这里检测，否则整个对局期间都不会重适配。
+        check_resolution_change()
         # 对局中每轮都做存活检测：炉石闪退/卡死时这里会自动停止，
         # 不会再对着失效画面一直重试 OCR。
         check_hearthstone_liveness()
