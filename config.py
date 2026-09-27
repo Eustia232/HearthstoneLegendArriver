@@ -142,6 +142,18 @@ def _user_desktop_size() -> Optional[tuple[int, int]]:
     return None
 
 
+def _user_desktop_dpi() -> Optional[int]:
+    """读取用户显式指定的系统 DPI（ui_config.json 的 desktop_dpi）。"""
+    try:
+        dpi = _UI.get("desktop_dpi")
+        if dpi is None:
+            return None
+        dpi = int(dpi)
+        return dpi if dpi > 0 else None
+    except Exception:
+        return None
+
+
 # ---------------------------------------------------------------- 盒子 UI 覆盖项
 # 盒子（HSAng）的屏幕元素位置取决于盒子窗口，与游戏分辨率无关，因此按桌面
 # 绝对像素使用（layout.ANCHOR_SCREEN）。默认值是 1920×1080 实测；盒子窗口
@@ -447,12 +459,16 @@ class RecommendationConfig:
     """
 
     # ------------------------------------------------------------------ 屏幕
-    # 桌面分辨率（程序校验用），DPI 必须 100%（96）。
+    # 桌面分辨率（程序校验用）。
     # None = 启动时自动检测主屏分辨率；ui_config.json 的 "desktop_size": [w, h]
     # 可显式指定（写错会被环境自检判 ❌）。捕获帧校验用它比对实际截图尺寸。
     # 点击/判定坐标的换算在 layout.py，与这里的校验值同源，任意分辨率一致。
     desktop_size: Optional[tuple[int, int]] = None
-    desktop_dpi: int = 96
+    # 系统 DPI（程序校验用）。None = 启动时经 layout.detected_desktop_dpi()
+    # 自动检测（进程已声明 DPI 感知，非 100% 缩放返回真实值，如 125% → 120）；
+    # ui_config.json 的 "desktop_dpi" 可显式指定。捕获帧校验用它比对帧元数据
+    # 的 DPI：两者一致才认为“截屏世界”与“配置世界”相同。任意缩放均可用。
+    desktop_dpi: Optional[int] = None
 
     # 盒子面板完整区域（屏幕坐标 left, top, right, bottom）。
     # 覆盖左侧“打法参考A”推荐面板：宽 271，高 938。
@@ -545,6 +561,13 @@ class RecommendationConfig:
         if size is None:
             size = layout.detected_desktop_size()
         object.__setattr__(self, "desktop_size", (int(size[0]), int(size[1])))
+
+        # desktop_dpi：显式指定 > ui_config 覆盖 > 自动检测系统 DPI
+        # （进程 DPI 感知后为真实值，如 125% 缩放 → 120，不再要求 96）。
+        dpi = self.desktop_dpi or _user_desktop_dpi()
+        if dpi is None:
+            dpi = layout.detected_desktop_dpi()
+        object.__setattr__(self, "desktop_dpi", int(dpi))
 
         roi = _user_roi()
         if roi is not None:

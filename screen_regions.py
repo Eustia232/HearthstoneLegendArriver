@@ -152,19 +152,15 @@ def _check(key: str, label: str, status: str, detail: str,
             "hint": hint, "required": bool(required)}
 
 
-def _expected(config) -> tuple[int, int, int]:
+def _expected(config) -> tuple[int, int]:
     if config is None:
-        return (1920, 1080, 96)
+        return (1920, 1080)
     size = getattr(config, "desktop_size", (1920, 1080))
     try:
         width, height = int(size[0]), int(size[1])
     except Exception:
         width, height = 1920, 1080
-    try:
-        dpi = int(getattr(config, "desktop_dpi", 96))
-    except Exception:
-        dpi = 96
-    return width, height, dpi
+    return width, height
 
 
 # ---------------------------------------------------------------- 预览图
@@ -262,7 +258,7 @@ def build_region_preview(config=None, grabber: Optional[Callable] = None,
     image = image.convert("RGB")
     actual_width, actual_height = image.size
 
-    expected_width, expected_height, expected_dpi = _expected(config)
+    expected_width, expected_height = _expected(config)
     screen_width, screen_height, dpi = 0, 0, 0
     try:
         screen_width, screen_height, dpi = screen_metrics()
@@ -304,7 +300,7 @@ def build_region_preview(config=None, grabber: Optional[Callable] = None,
             "请用浮窗「校准」或区域框预览核对各框位置是否正确。",
             required=False))
     if dpi:
-        if dpi == expected_dpi:
+        if dpi == layout.REFERENCE_DPI:
             checks.append(_check("dpi", "显示缩放（DPI）", STATUS_OK,
                                  f"{dpi}（{round(dpi / 96 * 100)}%）"))
         else:

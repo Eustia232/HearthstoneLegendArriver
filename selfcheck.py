@@ -31,6 +31,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
+# 纯标准库项目模块（无第三方依赖），用于 DPI 参考值常量。
+import layout
+
 ROOT = Path(__file__).resolve().parent
 REQUIREMENTS_PATH = ROOT / "requirements.txt"
 UI_CONFIG_PATH = ROOT / "ui_config.json"
@@ -243,13 +246,6 @@ def _expected_desktop_size(config) -> tuple[int, int]:
     return (1920, 1080)
 
 
-def _expected_dpi(config) -> int:
-    try:
-        return int(getattr(config, "desktop_dpi", 96))
-    except Exception:
-        return 96
-
-
 def _current_screen_size() -> tuple[int, int]:
     try:
         import ctypes
@@ -418,7 +414,8 @@ def environment_items(config=None) -> list[dict]:
             "改成实际分辨率；炉石用全屏模式（不要用最大化窗口）。",
             True, purpose)
 
-    expected_dpi = _expected_dpi(config)
+    # 与参考缩放（100%=96）对比，仅信息性：DPI 感知后任意缩放按物理像素工作。
+    expected_dpi = layout.REFERENCE_DPI
     dpi = _current_dpi()
     purpose = "脚本已声明 DPI 感知，任意缩放按物理像素工作"
     if dpi == 0:

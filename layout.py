@@ -142,6 +142,24 @@ def detected_desktop_size() -> tuple[int, int]:
     return _win32_screen_size() or (REF_WIDTH, REF_HEIGHT)
 
 
+# 进程声明 DPI 感知后的“参考缩放”（100%）。仅用于自检的信息性对比；
+# 任意缩放都按物理像素工作，不再作为硬性要求。
+REFERENCE_DPI = 96
+
+
+def detected_desktop_dpi() -> int:
+    """系统 DPI（每次实时查询）；读取失败回退参考值 96（测试/非 Windows 可用）。
+
+    进程已声明 DPI 感知时返回真实值（如 125% 缩放 → 120）。
+    desktop_capture 的帧校验用它做基准：帧 dpi 与配置一致即认为
+    “截屏世界”与“配置世界”相同，不一致时拒绝出推荐（防错位数据）。
+    """
+    try:
+        return int(ctypes.windll.user32.GetDpiForSystem())
+    except Exception:
+        return REFERENCE_DPI
+
+
 def enable_dpi_awareness() -> bool:
     """声明进程 DPI 感知：此后所有坐标/截屏按物理像素工作。
 

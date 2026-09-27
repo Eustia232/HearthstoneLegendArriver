@@ -5,7 +5,9 @@
 在任意平台都可运行；不触发 Windows API（auto_detect 的兜底行为在此验证）。
 """
 
+import os
 import unittest
+from unittest import mock
 
 import layout
 
@@ -225,6 +227,21 @@ class SampleMatchesTests(unittest.TestCase):
             self.pixels, -5, 0, (23, 52, 105)))
         self.assertFalse(layout.sample_matches(
             self.pixels, 0, 99, (23, 52, 105)))
+class DetectedDesktopDpiTests(unittest.TestCase):
+    """detected_desktop_dpi：非 Windows 回退参考值；Windows 读真实系统 DPI。"""
+
+    @unittest.skipIf(os.name == "nt", "非 Windows 平台验证回退值")
+    def test_non_windows_falls_back_to_reference_dpi(self):
+        self.assertEqual(96, layout.REFERENCE_DPI)
+        self.assertEqual(96, layout.detected_desktop_dpi())
+
+    @unittest.skipUnless(os.name == "nt", "ctypes.windll 仅 Windows 可用")
+    def test_windows_reads_real_system_dpi(self):
+        import ctypes
+
+        with mock.patch.object(ctypes.windll.user32, "GetDpiForSystem",
+                               create=True, return_value=120):
+            self.assertEqual(120, layout.detected_desktop_dpi())
 
 
 if __name__ == "__main__":
