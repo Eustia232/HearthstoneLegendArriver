@@ -52,6 +52,18 @@ def player_name_check(state, my_name=None):
     return {"config": name, "players": players, "matched": matched}
 
 
+def _other_player_id(state, my_pid):
+    """取对方 PlayerID：从 player_id_map_dict 的键里挑另一个。
+
+    不能用 3 - my_pid：只有标准对局 PlayerID 才是 1/2，练习赛等模式会出现
+    4/12、6/14、7/15 这类编号，旧公式会算出 -3/-9 之类的假 ID。
+    """
+    for pid in state.player_id_map_dict:
+        if str(pid) != str(my_pid):
+            return str(pid)
+    return "0"
+
+
 class LogState:
     def __init__(self):
         self.session_id = "unknown-session"
@@ -500,8 +512,6 @@ def update_state(state, line_info_container):
                 if entity_string != state.oppo_name:
                     state.oppo_name = entity_string
 
-            assert int(entity_id) <= 3
-
         # 情形三 "TAG_CHANGE Entity=[entityName=UNKNOWN ENTITY [cardType=INVALID] id=14 ...]"
         # 此时的EntityId已经被提取出来了
         else:
@@ -532,8 +542,7 @@ def update_state(state, line_info_container):
                and value not in ["HERO", "HERO_POWER", "PLAYER", "GAME"] \
                and "CONTROLLER" in state.current_update_entity.tag_dict:
                 state.my_player_id = state.current_update_entity.query_tag("CONTROLLER")
-                # 双方PlayerID, 一个是1, 一个是2
-                state.oppo_player_id = str(3 - int(state.my_player_id))
+                state.oppo_player_id = _other_player_id(state, state.my_player_id)
                 # debug_print(f"my_player_id: {state.my_player_id}")
 
         entity = state.current_update_entity
@@ -557,15 +566,13 @@ def update_state(state, line_info_container):
         if MY_NAME and MY_NAME in player_name:
             # 日志明确给出“我”的名字：直接确立己方 PlayerID，
             # 不再依赖“第一张卡”的 CONTROLLER 推断（那会因先读到对手怪而反）。
-            try:
-                my_pid = str(player_id)
-                oppo_pid = str(3 - int(my_pid))
-            except (TypeError, ValueError):
-                my_pid = oppo_pid = None
-            if my_pid and (state.my_player_id != my_pid
-                           or state.oppo_player_id != oppo_pid):
+            my_pid = str(player_id)
+            oppo_pid = _other_player_id(state, my_pid)
+            if state.my_player_id != my_pid \
+                    or (oppo_pid != "0" and state.oppo_player_id != oppo_pid):
                 state.my_player_id = my_pid
-                state.oppo_player_id = oppo_pid
+                if oppo_pid != "0":
+                    state.oppo_player_id = oppo_pid
         elif state.my_player_id != "0" and \
                 player_id == state.oppo_player_id and MY_NAME in player_name:
             global _MY_PLAYER_SWAP_WARNED
