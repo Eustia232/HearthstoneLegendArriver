@@ -101,7 +101,6 @@ class GameLayout:
 # 默认恒等（参考布局）：单元测试与未调用 auto_detect 的路径行为与旧版一致。
 _REFERENCE_LAYOUT = GameLayout()
 _current_layout: GameLayout | None = None
-_detected_size: tuple[int, int] | None = None
 
 
 def current() -> GameLayout:
@@ -135,11 +134,40 @@ def _win32_screen_size() -> tuple[int, int] | None:
 
 
 def detected_desktop_size() -> tuple[int, int]:
-    """主屏分辨率；读取失败回退参考分辨率（保证测试/非 Windows 可用）。"""
-    global _detected_size
-    if _detected_size is None:
-        _detected_size = _win32_screen_size() or (REF_WIDTH, REF_HEIGHT)
-    return _detected_size
+    """主屏分辨率（每次实时查询）；读取失败回退参考分辨率（测试/非 Windows 可用）。
+
+    不做缓存：炉石排他全屏切换显示模式、或“web 启动时”与“自动化启动时”
+    分辨率不同，实时查询能拿到最新值。
+    """
+    return _win32_screen_size() or (REF_WIDTH, REF_HEIGHT)
+
+
+def enable_dpi_awareness() -> bool:
+    """声明进程 DPI 感知：此后所有坐标/截屏按物理像素工作。
+
+    必须在进程的任何窗口创建 / 截屏 / GetSystemMetrics 调用之前执行
+    （入口模块的第一条语句）。不声明时，Windows 会把非 100% 缩放下的坐标
+    空间虚拟化（实测 2560×1440@125% 被进程看成 2048×1152），截屏、点击、
+    分辨率检测会整体错位——自检连真实缩放都读不到。
+
+    返回是否由本次调用成功声明；非 Windows / 已声明过 / 失败 → False
+    （重复调用无害）。
+    """
+    try:
+        import ctypes
+    except Exception:
+        return False
+    try:
+        # PER_MONITOR_DPI_AWARE：GetSystemMetrics / BitBlt / SetCursorPos
+        # / ImageGrab 全部走物理像素，与 layout 的映射空间一致。
+        if int(ctypes.windll.shcore.SetProcessDpiAwareness(2)) == 0:
+            return True
+    except Exception:
+        pass
+    try:
+        return bool(ctypes.windll.user32.SetProcessDPIAware())
+    except Exception:
+        return False
 
 
 def auto_detect() -> GameLayout:

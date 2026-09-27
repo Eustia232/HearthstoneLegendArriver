@@ -39,14 +39,10 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont, ImageGrab
 
 # ---------------------------------------------------------------- DPI
-# 与程序截图坐标一致：物理像素坐标（进程声明 DPI aware，1.0x 缩放直接吻合）。
-try:
-    ctypes.windll.shcore.SetProcessDpiAwareness(2)
-except Exception:
-    try:
-        ctypes.windll.user32.SetProcessDPIAware()
-    except Exception:
-        pass
+# 与程序截图坐标一致：物理像素坐标。统一走 layout.enable_dpi_awareness()
+# （与 web_ui / main 相同声明，避免两套行为）。
+import layout as _layout
+_layout.enable_dpi_awareness()
 
 # ---------------------------------------------------------------- Win32
 USER32 = ctypes.windll.user32

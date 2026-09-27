@@ -17,6 +17,13 @@
 from __future__ import annotations
 
 import ctypes
+
+# 声明进程 DPI 感知：必须在任何窗口/截屏/GetSystemMetrics 之前执行，
+# 否则非 100% 缩放下坐标空间被虚拟化（如 2560×1440@125% → 2048×1152），
+# 截屏、点击、分辨率检测会整体错位。非 Windows 下是无害的 no-op。
+import layout as _layout
+_layout.enable_dpi_awareness()
+
 try:
     import log_overlay
 except Exception as exc:

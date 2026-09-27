@@ -1261,6 +1261,8 @@ def AutoHS_automata():
 
 
 if __name__ == "__main__":
+    # 直接 python FSM_action.py 的遗留入口：同样先声明 DPI 感知。
+    layout.enable_dpi_awareness()
     keyboard.add_hotkey("ctrl+q", system_exit)
 
     init()

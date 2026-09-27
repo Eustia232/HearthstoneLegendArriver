@@ -128,7 +128,8 @@ class RegionPreviewTests(unittest.TestCase):
 
         statuses = {check["key"]: check["status"] for check in result["checks"]}
         self.assertEqual("fail", statuses["resolution"])
-        self.assertEqual("fail", statuses["dpi"])
+        # 非 100% 缩放已支持（DPI 感知），降级为提示而非失败
+        self.assertEqual("warn", statuses["dpi"])
         self.assertFalse(result["ok"])
         resolution = next(c for c in result["checks"]
                           if c["key"] == "resolution")

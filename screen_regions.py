@@ -309,9 +309,10 @@ def build_region_preview(config=None, grabber: Optional[Callable] = None,
                                  f"{dpi}（{round(dpi / 96 * 100)}%）"))
         else:
             checks.append(_check(
-                "dpi", "显示缩放（DPI）", STATUS_FAIL,
-                f"{dpi}（{round(dpi / 96 * 100)}%，要求 100%）",
-                "显示设置 → 缩放改成 100%：不是 100% 时截图和点击会整体偏移。"))
+                "dpi", "显示缩放（DPI）", STATUS_WARN,
+                f"{dpi}（{round(dpi / 96 * 100)}%）",
+                "非 100% 缩放已支持（进程声明了 DPI 感知，坐标按物理像素换算）；"
+                "100% 是实测最充分的配置。"))
 
     # --- 逐个区域：是否在屏幕内 + 画框
     regions = draw_region_boxes(image, config, scale=scale)

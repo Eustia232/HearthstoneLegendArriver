@@ -420,7 +420,7 @@ def environment_items(config=None) -> list[dict]:
 
     expected_dpi = _expected_dpi(config)
     dpi = _current_dpi()
-    purpose = "缩放不是 100% 时截图与点击会整体偏移"
+    purpose = "脚本已声明 DPI 感知，任意缩放按物理像素工作"
     if dpi == 0:
         scaling = _item("dpi", "显示缩放（DPI）", STATUS_WARN, "读取失败", "",
                         False, purpose)
@@ -429,9 +429,11 @@ def environment_items(config=None) -> list[dict]:
                         f"{dpi}（{round(dpi / 96 * 100)}%）", "", True, purpose)
     else:
         scaling = _item(
-            "dpi", "显示缩放（DPI）", STATUS_FAIL,
-            f"{dpi}（{round(dpi / 96 * 100)}%，要求 100%）",
-            "显示设置 → 缩放改成 100%：缩放不是 100% 时截图和点击都会整体偏移。",
+            "dpi", "显示缩放（DPI）", STATUS_WARN,
+            f"{dpi}（{round(dpi / 96 * 100)}%）",
+            "非 100% 缩放已支持（进程声明了 DPI 感知，坐标按物理像素换算）；"
+            "100% 是实测最充分的配置，遇到点击偏差可先改回 100% 排除变量。"
+            "另外请把炉石内的游戏分辨率设成与桌面一致（全屏、不切换显示模式）。",
             True, purpose)
 
     items = [admin, screen, scaling, _hearthstone_item(),
