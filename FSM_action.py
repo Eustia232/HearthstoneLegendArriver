@@ -149,8 +149,11 @@ def initialize_recommendation_automation(
         mulligan_reader = StableRecommendationReader(
             recommendation_config, recommendation_reader.backend,
             text_normalizer=recommendation_parser.normalize_action_text)
-        recommendation_validator = RecommendationValidator(
-            recommendation_config)
+    # 校验器必须随每次重建换绑最新 config：它逐帧比对 desktop_size/dpi，
+    # 若沿用首建时的旧 config，分辨率看门狗切换后所有新帧都会被拒
+    #（实测表现：换牌/出牌 desktop_size 无限重试，直到改回旧分辨率）。
+    # 校验器本身只持有配置引用，重建是零成本的。
+    recommendation_validator = RecommendationValidator(recommendation_config)
 
     def read_mulligan_action():
         # 换牌面板是否在场，由 OCR 证据裁定：识别出的文本必须能解析出
