@@ -1,30 +1,31 @@
 # -*- coding: utf-8 -*-
-"""炉石传说后台模式可行性探针。
+"""炉石传说后台模式可行性探针 v2（实验矩阵版）。
 
-回答两个只有实机才能回答的问题：
-1. 炉石窗口被遮挡时，PrintWindow / 窗口 DC / 桌面 BitBlt 三种截图各能否拿到活帧？
-2. 炉石（Unity）是否消费 PostMessage / SendMessage 的合成鼠标消息？
-   点击落点是消息坐标还是真实光标位置？拖拽能否用消息序列完成？键盘（ESC）呢？
+回答三个只有实机才能回答的问题：
+1. 渲染：炉石在【前台】【可见但失焦】【被遮挡】【被遮挡+幽灵透明】四种状态下，
+   画面是否还在渲染？（决定后台截图与后台输入的根本可行性）
+2. 输入：炉石（Unity）是否消费 PostMessage / SendMessage 的合成鼠标消息？
+   落点采纳消息坐标还是真实光标位置？——先在前台做对照，再在遮挡下测 A/B/C。
+3. 键盘与拖拽：ESC 消息是否被消费？拖拽消息序列能否放下随从？
 
-点击探针的三种策略（均可后台执行，区别在注入通道）：
+v2 与 v1 的差别（根据首轮实机反馈）：
+- 显式确认「主菜单/大厅」状态（截图 + 人工 y/n），避免画面状态未知导致误判；
+- 渲染检测从单一「遮挡」扩展为四状态矩阵，拆解「画面静止」与「停止渲染」；
+- 新增前台对照组（F1）：合成消息在前台都不被消费 vs 仅后台失败，两种结论完全不同；
+- 点击尝试同时记录中央差异与整帧差异（区分「没生效」与「点到了别处」）；
+- 新增 ghost-alpha 实验（窗口设为近透明，经典后台挂机保活手段）。
+
+点击策略：
     A  post        纯 PostMessage，不碰真实光标（最优解，若成功即"无感后台"）
     B  send        SendMessage（同步注入）
     C  post_flick  PostMessage + SetCursorPos 瞬移再还原（游戏查真实光标时的兜底）
 
-动作选无风险的「点主菜单设置齿轮打开选项菜单 → 点黄色"完成"按钮关闭 → 再开一次
-→ 按 ESC 关闭」，全部由前后截图差异自动判定，不进对局、不改任何设置。
-
 用法（在有炉石的 Windows 机器上，管理员终端）：
-    python probe_background.py             # 截图 + 点击探针
-    python probe_background.py --drag      # 追加拖牌探针（需先进练习模式）
-    python probe_background.py --strategies A,C
+    uv run --no-project python probe_background.py
+    uv run --no-project python probe_background.py --drag   # 追加拖牌探针（练习模式）
 
 输出：probe_out/ 下的截图与 probe_report.json，回传方式见 docs/background-probe.md。
-
-实现说明：消息序列配方取自 MaaFramework MessageInput.cpp/InputUtils.h
-（WM_ACTIVATE 伪激活 → WM_MOUSEMOVE → WM_LBUTTONDOWN/UP，lParam=客户区坐标）；
-win32 只在 Windows 分支导入，纯逻辑部分可在任意平台单测
-（tests/test_probe_background.py）。
+win32 只在 Windows 分支导入，纯逻辑部分可在任意平台单测（tests/test_probe_background.py）。
 """
 from __future__ import annotations
 
@@ -51,22 +52,26 @@ WM_LBUTTONUP = 0x0202
 MK_LBUTTON = 0x0001
 VK_ESCAPE = 0x1B
 PW_RENDERFULLCONTENT = 0x00000002  # Win8.1+，可截被遮挡的 D3D 窗口
+GWL_EXSTYLE = -20
+WS_EX_LAYERED = 0x00080000
+LWA_ALPHA = 0x2
 
 # ---------------------------------------------------------------- 参考坐标
 # 与 click.py / layout.py 同源的 1920x1080 实测值；经 ref_to_client 映射到客户区。
 REF_WIDTH = 1920
 REF_HEIGHT = 1080
-GEAR_REF = (1895, 1060)        # 主菜单右下角设置齿轮（click.click_setting 同源）
+GEAR_REF = (1895, 1060)        # 大厅右下角设置齿轮（click.click_setting 同源）
 HAND1_REF = (885, 1000)        # 手牌 1 号位（HAND_CARD_X[1][0]）
 BOARD_CENTER_REF = (960, 600)  # 场上随从区中心
 
 # ---------------------------------------------------------------- 判定阈值
 MENU_DIFF_THRESHOLD = 10.0   # 中央区域前后平均差 ≥ 此值 → 菜单打开/未关闭
-ALIVE_DIFF_THRESHOLD = 1.0   # 间隔 1s 两帧平均差 ≥ 此值 → 画面仍在渲染（活帧）
+ALIVE_DIFF_THRESHOLD = 1.0   # 相邻帧平均差 ≥ 此值 → 画面仍在渲染（活帧）
 BLACK_MEAN_THRESHOLD = 6.0   # 全图均值 < 此值 → 黑帧
 GEAR_RETRY_OFFSETS = ((0, 0), (6, 0), (-6, 0), (0, 6), (0, -6))  # 齿轮点击容错网格
+FRAME_INTERVAL_S = 0.8       # 活帧采样间隔
 
-TRANSPORTS = ("post", "send", "post_flick")  # 探针策略 A / B / C
+TRANSPORTS = ("post", "send", "post_flick")  # 后台探针策略 A / B / C
 TRANSPORT_LABELS = {
     "post": "A 纯 PostMessage（不碰真实光标）",
     "send": "B SendMessage（同步注入）",
@@ -211,6 +216,20 @@ def capture_is_black(img: np.ndarray) -> bool:
     return img.size == 0 or float(img.mean()) < BLACK_MEAN_THRESHOLD
 
 
+def alive_summary(frames: list[np.ndarray]) -> dict:
+    """多帧活帧判定：取相邻帧差异的最大值与阈值比较（纯函数）。"""
+    diffs = []
+    for i in range(1, len(frames)):
+        try:
+            diffs.append(round(mean_abs_diff(frames[i - 1], frames[i]), 3))
+        except ValueError:
+            return {"frames": len(frames), "mean_diffs": None,
+                    "max_diff": None, "alive": False}
+    max_diff = max(diffs) if diffs else 0.0
+    return {"frames": len(frames), "mean_diffs": diffs,
+            "max_diff": max_diff, "alive": bool(max_diff >= ALIVE_DIFF_THRESHOLD)}
+
+
 def find_yellow_button(img: np.ndarray, y_min_ratio: float = 0.55,
                        x_band: tuple[float, float] = (0.2, 0.8),
                        min_pixels: int = 300) -> tuple[int, int] | None:
@@ -237,13 +256,44 @@ def find_yellow_button(img: np.ndarray, y_min_ratio: float = 0.55,
 
 
 def compute_verdict(report: dict) -> dict:
-    """按探针结果给出人读结论（纯函数，report 结构见 run_* 函数）。"""
-    captures = report.get("captures", {})
-    pw = captures.get("printwindow", {})
-    alive = captures.get("printwindow_alive", {})
-    capture_ok = (bool(pw.get("ok"))
-                  and not bool(pw.get("black", True))
-                  and bool(alive.get("alive")))
+    """按探针结果给出人读结论（纯函数，report 结构见各 run_* 函数）。"""
+    caps = report.get("captures", {})
+    rendering = caps.get("rendering", {})
+    pw = caps.get("printwindow", {})
+    pw_ok = bool(pw.get("ok")) and not bool(pw.get("black", True))
+
+    occ = rendering.get("occluded", {})
+    occ_alpha = rendering.get("occluded_alpha", {})
+    occluded_alive = bool(occ.get("alive")) or bool(occ_alpha.get("alive"))
+
+    if not pw_ok:
+        capture_verdict = "PrintWindow 基线不可用（黑帧/失败）：截图通道未过"
+    elif occ.get("alive"):
+        capture_verdict = "遮挡下直接拿到活帧：截图通道完全可用"
+    elif occ_alpha.get("alive"):
+        capture_verdict = ("遮挡下需要 ghost-alpha（窗口近透明）才有活帧："
+                           "截图可用，但后台方案要配合窗口透明保活")
+    elif rendering.get("foreground", {}).get("alive"):
+        capture_verdict = ("前台有活帧、遮挡下没有：游戏在遮挡/失焦时暂停了渲染，"
+                           "PrintWindow 只能拿到陈旧画面")
+    else:
+        capture_verdict = "连前台都测不到活帧：采样期间画面本身是静止的（确认当时在大厅）"
+
+    fg_post = report.get("click_foreground", {}).get("post", {})
+    fg_flick = report.get("click_foreground", {}).get("post_flick", {})
+    fg_post_ok = bool(fg_post.get("open", {}).get("ok")) or (
+        fg_post.get("user_confirmed") is True)
+    fg_flick_ok = bool(fg_flick.get("open", {}).get("ok")) or (
+        fg_flick.get("user_confirmed") is True)
+    if fg_post_ok:
+        foreground_verdict = "前台：纯 PostMessage 合成点击被消费（最优）"
+        input_any = True
+    elif fg_flick_ok:
+        foreground_verdict = "前台：需要真实光标瞬移才被消费（游戏读真实光标）"
+        input_any = True
+    else:
+        foreground_verdict = "前台对照组失败：炉石不消费合成鼠标消息，消息注入输入路线不通"
+        input_any = False
 
     def round_worked(value: dict | None) -> bool:
         return bool(value and value.get("open", {}).get("ok")
@@ -255,35 +305,52 @@ def compute_verdict(report: dict) -> dict:
         if round_worked(click.get(transport)):
             best_transport = transport
             break
-    notes = {
-        "post": "纯 PostMessage 可用：最优后台方案，无需移动真实光标",
-        "send": "SendMessage 可用：同步注入，后台可用",
-        "post_flick": "仅瞬移方案可用：后台可跑，但每次操作真实光标会闪动",
+    if not input_any:
+        # 前台对照失败说明合成消息根本不被消费，后台轮的"成功"不可信
+        best_transport = None
+    background_notes = {
+        "post": "后台纯 PostMessage 可用：无感后台",
+        "send": "后台 SendMessage 可用",
+        "post_flick": "后台需光标瞬移：可用但操作瞬间光标会闪",
     }
     if best_transport is not None:
-        input_verdict = notes[best_transport]
-    elif any(v.get("open", {}).get("ok") for v in click.values()
-             if isinstance(v, dict)):
-        input_verdict = "点击能让菜单打开但未能自动关闭：部分可用，看截图人工判读"
+        background_verdict = background_notes[best_transport]
+    elif input_any and occluded_alive:
+        background_verdict = "后台点击轮未通过（前台对照通过）：看各轮 full_diff 与截图人工判读"
     else:
-        input_verdict = "三种策略均未成功：消息注入路线未通过"
+        background_verdict = "后台点击轮未通过"
 
     esc_results = [v.get("keyboard_esc_ok") for v in click.values()
                    if isinstance(v, dict)]
     if any(esc_results):
         keyboard_verdict = "PostMessage 键盘（ESC）可用"
     elif any(r is False for r in esc_results):
-        keyboard_verdict = "PostMessage 键盘（ESC）未生效（与 UE/Raw Input 类引擎一致）"
+        keyboard_verdict = "PostMessage 键盘（ESC）未生效"
     else:
-        keyboard_verdict = "未测得（没有成功打开过菜单）"
+        keyboard_verdict = "未测得"
 
-    overall = "可行" if capture_ok and best_transport else "待排查/不可行"
+    if not pw_ok:
+        overall = "不可行"
+        overall_note = "截图基线失败，先解决 PrintWindow（切换窗口化重试）"
+    elif not input_any:
+        overall = "不可行"
+        overall_note = "前台对照失败：合成鼠标消息完全不被消费，后台输入路线搁置"
+    elif occluded_alive and best_transport:
+        overall = "可行"
+        overall_note = "截图与输入都通过，可以进入后台后端实现"
+    else:
+        overall = "有条件可行"
+        overall_note = "部分通道已验证，剩余环节看 verdict 各项与截图人工判读"
+
     return {
         "overall": overall,
-        "capture_ok": capture_ok,
-        "best_transport": best_transport,
-        "input_verdict": input_verdict,
+        "overall_note": overall_note,
+        "capture_verdict": capture_verdict,
+        "foreground_verdict": foreground_verdict,
+        "background_verdict": background_verdict,
         "keyboard_verdict": keyboard_verdict,
+        "best_transport": best_transport,
+        "occluded_alive": occluded_alive,
     }
 
 
@@ -521,6 +588,42 @@ def click_at(hwnd: int, transport: str, x: int, y: int) -> None:
                    transport)
 
 
+def capture_frames(hwnd: int, n: int = 3, interval: float = FRAME_INTERVAL_S
+                   ) -> list[np.ndarray]:
+    """PrintWindow 连续采样 n 帧（None 帧剔除）。"""
+    frames: list[np.ndarray] = []
+    for i in range(n):
+        img, _ = capture_printwindow(hwnd)
+        if img is not None:
+            frames.append(img)
+        if i < n - 1:
+            time.sleep(interval)
+    return frames
+
+
+def set_alpha_ghost(hwnd: int) -> int:
+    """把窗口设为近透明（幽灵模式）：加 WS_EX_LAYERED + alpha=3。
+
+    经典后台挂机保活手段：窗口仍被 DWM 合成（可能绕过遮挡暂停渲染），
+    但肉眼几乎不可见。返回原始扩展样式供 restore_alpha 还原。
+    """
+    import win32gui
+    original = win32gui.GetWindowLong(hwnd, GWL_EXSTYLE)
+    win32gui.SetWindowLong(hwnd, GWL_EXSTYLE, original | WS_EX_LAYERED)
+    win32gui.SetLayeredWindowAttributes(hwnd, 0, 3, LWA_ALPHA)
+    return original
+
+
+def restore_alpha(hwnd: int, original_exstyle: int) -> None:
+    """还原幽灵模式：先恢复不透明再摘掉 LAYERED 样式。"""
+    import win32gui
+    try:
+        win32gui.SetLayeredWindowAttributes(hwnd, 0, 255, LWA_ALPHA)
+        win32gui.SetWindowLong(hwnd, GWL_EXSTYLE, original_exstyle)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[WARN] 还原窗口透明样式失败：{exc}（重启炉石即可恢复）")
+
+
 def _wait_enter(prompt: str) -> None:
     try:
         input(prompt)
@@ -528,67 +631,171 @@ def _wait_enter(prompt: str) -> None:
         print("（非交互环境：跳过等待继续执行）")
 
 
+def _ask(prompt: str) -> str:
+    try:
+        return input(prompt).strip().lower()
+    except EOFError:
+        return "y"
+
+
 # ---------------------------------------------------------------- 探针流程
 
 
-def capture_probe(hwnd: int, out_dir: Path) -> dict:
-    """截图探针：三种方式 ×（遮挡状态 + 1s 间隔两帧）→ 是否活帧。"""
-    print("\n========== 截图探针 ==========")
-    result: dict = {"occluded": is_occluded(hwnd)}
-    if not result["occluded"]:
-        print("当前炉石未被遮挡。为了测「被遮挡时能否截到」：")
-        _wait_enter("请把任意其他窗口完全盖住炉石，然后回到这里按回车（直接回车=不遮挡硬测）")
-        result["occluded"] = is_occluded(hwnd)
-    print(f"遮挡状态：{'已遮挡' if result['occluded'] else '未遮挡（结果仅供参考）'}")
+def ensure_main_menu(hwnd: int, out_dir: Path, max_rounds: int = 3) -> bool:
+    """截图并让用户确认炉石停在大厅（主菜单），避免画面状态未知导致误判。"""
+    for _ in range(max_rounds):
+        img, _ = capture_printwindow(hwnd)
+        save_png(img, out_dir / "state_check.png")
+        print("已截图保存到 probe_out/state_check.png（大厅 = 有「对战模式」等"
+              "大按钮、右下角齿轮的界面）")
+        answer = _ask("截图里炉石是否停在大厅？(y=是 / n=不是，我先去操作) ")
+        if answer.startswith("y"):
+            return True
+        _wait_enter("请把炉石操作到大厅，然后回到这里按回车（我会重新截图确认）")
+    print("[WARN] 未确认大厅状态，继续探针（结果请人工复核截图）。")
+    return False
 
-    pw1, ok1 = capture_printwindow(hwnd)
+
+def rendering_probe(hwnd: int, out_dir: Path) -> dict:
+    """四状态渲染矩阵：前台 / 可见但失焦 / 被遮挡 / 被遮挡+幽灵透明。
+
+    大厅画面有持续动画，活帧 = 仍在渲染。四项差异直接指明
+    「后台截图/输入」的根本可行性，以及 ghost-alpha 是否是必要的保活手段。
+    """
+    print("\n========== 渲染四状态探针 ==========")
+    print("大厅画面有持续动画：帧间差异明显 = 还在渲染；≈0 = 已停渲染/画面静止。")
+    result: dict = {}
+
+    print("\n[R1/4] 前台")
+    _wait_enter("把 cmd 移开别挡住炉石 → 在这里按回车 → 3 秒内用鼠标点一下炉石"
+                "【顶部中间的空白处】把它切到前台 → 然后手完全离开鼠标")
+    time.sleep(3.0)
+    frames = capture_frames(hwnd)
+    result["foreground"] = alive_summary(frames)
+    save_png(frames[0] if frames else None, out_dir / "render_foreground.png")
+    print(f"  前台：{result['foreground']}")
+
+    print("\n[R2/4] 可见但失焦（模拟你切去干别的事）")
+    _wait_enter("点击 cmd 窗口让它成为活跃窗口，但把它摆到【不遮住炉石】的位置"
+                " → 按回车 → 手离开鼠标")
     time.sleep(1.0)
-    pw2, _ = capture_printwindow(hwnd)
-    wdc, ok2 = capture_window_dc(hwnd)
-    desk = capture_desktop()
+    frames = capture_frames(hwnd)
+    result["visible_unfocused"] = alive_summary(frames)
+    save_png(frames[0] if frames else None, out_dir / "render_unfocused.png")
+    print(f"  可见但失焦：{result['visible_unfocused']}")
 
-    result["printwindow"] = _capture_entry(pw1, ok1, "PrintWindow")
-    result["window_dc"] = _capture_entry(wdc, ok2, "窗口DC BitBlt")
-    result["desktop"] = _capture_entry(desk, True, "桌面BitBlt")
+    print("\n[R3/4] 被完全遮挡")
+    _wait_enter("把 cmd 拖大（或移动）到【完全盖住】炉石 → 按回车 → 手离开鼠标")
+    time.sleep(1.0)
+    print(f"  遮挡检测：{'已遮挡' if is_occluded(hwnd) else '未遮挡（请尽量盖严）'}")
+    frames = capture_frames(hwnd)
+    result["occluded"] = alive_summary(frames)
+    save_png(frames[0] if frames else None, out_dir / "render_occluded.png")
+    print(f"  被遮挡：{result['occluded']}")
 
-    save_png(pw1, out_dir / "capture_printwindow_1.png")
-    save_png(pw2, out_dir / "capture_printwindow_2.png")
-    save_png(wdc, out_dir / "capture_window_dc.png")
-    save_png(desk, out_dir / "capture_desktop.png")
+    print("\n[R4/4] 被遮挡 + 幽灵透明（ghost-alpha 实验）")
+    print("  把炉石窗口设为近透明（alpha=3）——经典后台挂机的保活手段，测完立刻还原。")
+    original = set_alpha_ghost(hwnd)
+    try:
+        frames = capture_frames(hwnd)
+        result["occluded_alpha"] = alive_summary(frames)
+        save_png(frames[0] if frames else None,
+                 out_dir / "render_occluded_alpha.png")
+        print(f"  遮挡+幽灵透明：{result['occluded_alpha']}")
+    finally:
+        restore_alpha(hwnd, original)
+        print("  窗口透明已还原。")
 
-    if pw1 is not None and pw2 is not None:
-        diff = mean_abs_diff(pw1, pw2)
-        result["printwindow_alive"] = {
-            "mean_diff": round(diff, 3),
-            "alive": frames_alive(pw1, pw2),
-        }
-    else:
-        result["printwindow_alive"] = {"mean_diff": None, "alive": False}
-
-    print(f"PrintWindow   ：{result['printwindow']}")
-    print(f"窗口 DC       ：{result['window_dc']}")
-    print(f"桌面 BitBlt   ：{result['desktop']}")
-    print(f"遮挡下仍在渲染（活帧）：{result['printwindow_alive']}")
-    if result["printwindow"].get("black"):
-        print("[提示] PrintWindow 全黑：独占全屏模式常见。请把炉石切到"
-              "「窗口化」（或无边框）后重跑本探针——后台模式本来就需要窗口化。")
+    print("\n四状态小结：")
+    for key in ("foreground", "visible_unfocused", "occluded", "occluded_alpha"):
+        print(f"  {key:<18}: alive={result[key]['alive']} "
+              f"max_diff={result[key]['max_diff']}")
     return result
 
 
-def _capture_entry(img: np.ndarray | None, ok: bool, label: str) -> dict:
-    return {
-        "ok": bool(ok and img is not None),
-        "black": bool(img is None or capture_is_black(img)),
-        "size": list(img.shape[:2]) if img is not None else None,
-        "label": label,
-    }
+def _try_close_menu(hwnd: int, transport: str, baseline: np.ndarray | None,
+                    out_dir: Path, tag: str) -> dict:
+    """关菜单：黄色按钮点击 → ESC → 人工兜底，返回关闭结果。"""
+    close_result: dict = {"ok": False, "via": None}
+    menu_img = capture_printwindow(hwnd)[0]
+    button = find_yellow_button(menu_img) if menu_img is not None else None
+    if button is not None:
+        off_x, off_y = window_to_client_offset(hwnd)
+        click_at(hwnd, transport, button[0] - off_x, button[1] - off_y)
+        time.sleep(0.8)
+        img = capture_printwindow(hwnd)[0]
+        closed = (baseline is not None and img is not None
+                  and center_diff(baseline, img) < MENU_DIFF_THRESHOLD)
+        if closed:
+            close_result.update(ok=True, via="yellow_button")
+            return close_result
+    dispatch_steps(hwnd, build_escape_sequence(), transport)
+    time.sleep(0.8)
+    img = capture_printwindow(hwnd)[0]
+    esc_closed = (baseline is not None and img is not None
+                  and center_diff(baseline, img) < MENU_DIFF_THRESHOLD)
+    close_result["esc_closed"] = esc_closed
+    if esc_closed:
+        close_result.update(ok=True, via="esc")
+        return close_result
+    save_png(img, out_dir / f"{tag}_stuck_menu.png")
+    print("  菜单疑似仍开着，请手动关闭（ESC 或点「完成」）。")
+    _wait_enter("  关好后按回车继续")
+    close_result["manual"] = True
+    return close_result
+
+
+def foreground_input_probe(hwnd: int, out_dir: Path) -> dict:
+    """前台对照组：炉石在前台、手不离鼠标，测合成消息是否被消费。
+
+    若前台都不被消费 → Unity 丢弃合成消息，后台输入路线直接判死；
+    若前台可用 → 后台轮的失败才是「遮挡/失焦」相关，值得继续攻关。
+    """
+    print("\n========== 前台输入对照组 ==========")
+    result: dict = {}
+    _wait_enter("F1 确认炉石在前台且完整可见；把光标移到【炉石窗口以外】"
+                "（桌面或 cmd 上）停住 → 按回车 → 之后手完全离开鼠标")
+    baseline = capture_printwindow(hwnd)[0]
+    save_png(baseline, out_dir / "fg_baseline.png")
+    cw, ch = client_size(hwnd)
+    gx, gy = gear_point(cw, ch)
+    print(f"  目标：右下角齿轮（客户区 {gx},{gy}）。请在炉石上观察结果。")
+
+    for transport in ("post", "post_flick"):
+        click_at(hwnd, transport, gx, gy)
+        time.sleep(1.0)
+        img = capture_printwindow(hwnd)[0]
+        c_diff = center_diff(baseline, img) if (baseline is not None
+                                                and img is not None) else -1.0
+        f_diff = mean_abs_diff(baseline, img) if (baseline is not None
+                                                  and img is not None) else -1.0
+        measured = c_diff >= MENU_DIFF_THRESHOLD
+        save_png(img, out_dir / f"fg_{transport}_after.png")
+        confirmed = _ask(f"  [{transport}] 整帧差异={f_diff:.1f} 中央差异={c_diff:.1f}。"
+                         "肉眼看到炉石弹出选项菜单了吗？(y/n) ").startswith("y")
+        entry = {
+            "transport": transport,
+            "center_diff": round(c_diff, 2),
+            "full_diff": round(f_diff, 2),
+            "measured_open": measured,
+            "user_confirmed": bool(confirmed),
+        }
+        if measured or confirmed:
+            print("  合成点击在前台生效！尝试自动关闭菜单…")
+            entry["close"] = _try_close_menu(hwnd, transport, baseline,
+                                             out_dir, f"fg_{transport}")
+            result[transport] = entry
+            break
+        result[transport] = entry
+        print(f"  [{transport}] 前台未生效。")
+    return result
 
 
 def click_probe_round(hwnd: int, transport: str, out_dir: Path,
                       tag: str) -> dict:
-    """一次策略回合：开菜单（点击测试1）→ 黄色按钮关闭（点击测试2）
-    → 再开一次 → ESC 关闭（键盘测试）→ 全失败则请求人工关闭。"""
-    print(f"\n---------- 点击策略 {TRANSPORT_LABELS[transport]} ----------")
+    """一轮后台点击：开菜单（点击测试1）→ 关菜单（点击测试2/ESC）。
+    炉石应处于【被遮挡 + 大厅】状态。"""
+    print(f"\n---------- 后台点击策略 {TRANSPORT_LABELS[transport]} ----------")
     cw, ch = client_size(hwnd)
     gx, gy = gear_point(cw, ch)
     result: dict = {
@@ -599,11 +806,11 @@ def click_probe_round(hwnd: int, transport: str, out_dir: Path,
         "keyboard_esc_ok": None,
         "left_open": False,
     }
-    print(f"目标：设置齿轮（客户区坐标 {gx},{gy}）；真实光标请停在屏幕角落不要动。")
+    print(f"  目标：设置齿轮（客户区坐标 {gx},{gy}）；手不要碰鼠标。")
 
     baseline = capture_printwindow(hwnd)[0]
     if baseline is None:
-        print("[FAIL] 连基线截图都拿不到，跳过本策略。")
+        print("[FAIL] 拿不到基线截图，跳过本策略。")
         return result
     save_png(baseline, out_dir / f"{tag}_baseline.png")
 
@@ -612,106 +819,37 @@ def click_probe_round(hwnd: int, transport: str, out_dir: Path,
         click_at(hwnd, transport, gx + dx, gy + dy)
         time.sleep(0.8)
         img = capture_printwindow(hwnd)[0]
-        diff = center_diff(baseline, img) if img is not None else -1.0
-        hit = diff >= MENU_DIFF_THRESHOLD
+        if img is None:
+            continue
+        c_diff = center_diff(baseline, img)
+        f_diff = mean_abs_diff(baseline, img)
+        hit = c_diff >= MENU_DIFF_THRESHOLD
         result["open"]["attempts"].append(
-            {"offset": [dx, dy], "center_diff": round(diff, 2), "menu_open": hit})
-        print(f"  齿轮点击偏移 {dx:+d},{dy:+d} → 中央差异 {diff:.1f} → "
-              f"{'菜单已打开' if hit else '未打开'}")
+            {"offset": [dx, dy], "center_diff": round(c_diff, 2),
+             "full_diff": round(f_diff, 2), "menu_open": hit})
+        print(f"  齿轮点击偏移 {dx:+d},{dy:+d} → 中央差异 {c_diff:.1f} / "
+              f"整帧差异 {f_diff:.1f} → {'菜单已打开' if hit else '未打开'}")
         if hit:
             opened = True
             save_png(img, out_dir / f"{tag}_menu_open.png")
             break
     result["open"]["ok"] = opened
     if not opened:
-        print(f"[结论] 策略 {transport.upper()} 的点击未生效（或没点中齿轮）——"
-              "若你肉眼看到菜单其实开了，说明判定阈值偏保守，请在回传时说明。")
+        full_moved = any(a["full_diff"] >= MENU_DIFF_THRESHOLD
+                         for a in result["open"]["attempts"])
+        if full_moved:
+            print("  [线索] 整帧有变化但中央没有：点击可能生效但落点在别处"
+                  "（游戏读真实光标位置）——看策略 C 与前台对照。")
+        else:
+            print("  [结论] 整帧完全无变化：合成点击未被消费（或游戏已停渲染）。")
         return result
 
-    # ---- 关闭测试 1：黄色“完成”按钮（更大的点击目标，顺带验证坐标换算）
-    menu_img = capture_printwindow(hwnd)[0]
-    button = find_yellow_button(menu_img) if menu_img is not None else None
-    off_x, off_y = window_to_client_offset(hwnd)
-    if button is not None:
-        bx_img, by_img = button
-        bx, by = bx_img - off_x, by_img - off_y
-        print(f"  找到黄色按钮（图内 {bx_img},{by_img} → 客户区 {bx},{by}），点击关闭")
-        click_at(hwnd, transport, bx, by)
-        time.sleep(0.8)
-        img = capture_printwindow(hwnd)[0]
-        closed = (img is not None
-                  and center_diff(baseline, img) < MENU_DIFF_THRESHOLD)
-        result["close"] = {"ok": closed, "via": "yellow_button",
-                           "button_image": [bx_img, by_img],
-                           "button_client": [bx, by]}
-        print(f"  关闭{'成功' if closed else '失败'}（黄色按钮）")
-        save_png(img, out_dir / f"{tag}_after_close1.png")
-    else:
-        print("  未在下部找到黄色“完成”按钮色块，改用 ESC 关闭。")
-
-    # ---- 关闭测试 2：ESC（键盘通道；若关闭测试 1 已成功则再开一次菜单）
-    if result["close"]["ok"]:
-        print("  再开一次菜单用于测试 ESC 键…")
-        opened2 = _open_menu(hwnd, transport, baseline, gx, gy, result)
-        if not opened2:
-            result["keyboard_esc_ok"] = None
-        else:
-            dispatch_steps(hwnd, build_escape_sequence(), transport)
-            time.sleep(0.8)
-            img = capture_printwindow(hwnd)[0]
-            esc_closed = (img is not None
-                          and center_diff(baseline, img) < MENU_DIFF_THRESHOLD)
-            result["keyboard_esc_ok"] = esc_closed
-            print(f"  ESC 关闭菜单：{'成功 → 后台键盘可用' if esc_closed else '未生效'}")
-            save_png(img, out_dir / f"{tag}_after_esc.png")
-            if not esc_closed:
-                _ensure_closed(hwnd, transport, baseline, result, tag, out_dir)
-    else:
-        # 菜单还开着：先试 ESC（顺带测键盘），再兜底
-        dispatch_steps(hwnd, build_escape_sequence(), transport)
-        time.sleep(0.8)
-        img = capture_printwindow(hwnd)[0]
-        esc_closed = (img is not None
-                      and center_diff(baseline, img) < MENU_DIFF_THRESHOLD)
-        result["keyboard_esc_ok"] = esc_closed
-        print(f"  ESC 关闭菜单：{'成功 → 后台键盘可用' if esc_closed else '未生效'}")
-        save_png(img, out_dir / f"{tag}_after_esc.png")
-        if not esc_closed:
-            _ensure_closed(hwnd, transport, baseline, result, tag, out_dir)
+    result["close"] = _try_close_menu(hwnd, transport, baseline,
+                                      out_dir, tag)
+    print(f"  关闭：{result['close']}")
+    if result["close"].get("esc_closed") is not None:
+        result["keyboard_esc_ok"] = result["close"]["esc_closed"]
     return result
-
-
-def _open_menu(hwnd: int, transport: str, baseline: np.ndarray,
-               gx: int, gy: int, result: dict) -> bool:
-    """再开一次菜单（第二次点击测试），成功返回 True。"""
-    for dx, dy in GEAR_RETRY_OFFSETS[:3]:
-        click_at(hwnd, transport, gx + dx, gy + dy)
-        time.sleep(0.8)
-        img = capture_printwindow(hwnd)[0]
-        if img is not None and center_diff(baseline, img) >= MENU_DIFF_THRESHOLD:
-            return True
-    print("  第二次打开菜单失败（不影响本轮已记录的结论）。")
-    return False
-
-
-def _ensure_closed(hwnd: int, transport: str, baseline: np.ndarray,
-                   result: dict, tag: str, out_dir: Path) -> None:
-    """关闭兜底：黄色按钮重试一次，仍失败则请用户手动关闭。"""
-    menu_img = capture_printwindow(hwnd)[0]
-    button = find_yellow_button(menu_img) if menu_img is not None else None
-    if button is not None:
-        off_x, off_y = window_to_client_offset(hwnd)
-        click_at(hwnd, transport, button[0] - off_x, button[1] - off_y)
-        time.sleep(0.8)
-    img = capture_printwindow(hwnd)[0]
-    if img is not None and center_diff(baseline, img) >= MENU_DIFF_THRESHOLD:
-        result["left_open"] = True
-        print("  [提示] 菜单疑似仍开着：请手动关闭（ESC 或点“完成”）后回车。")
-        _wait_enter("  关好后按回车继续")
-        img = capture_printwindow(hwnd)[0]
-        if img is not None and center_diff(baseline, img) < MENU_DIFF_THRESHOLD:
-            print("  已确认回到主菜单。")
-    save_png(img, out_dir / f"{tag}_final_state.png")
 
 
 def drag_probe(hwnd: int, out_dir: Path, transport: str = "post") -> dict:
@@ -739,9 +877,9 @@ def drag_probe(hwnd: int, out_dir: Path, transport: str = "post") -> dict:
         diff = mean_abs_diff(before, after, box)
         result["board_region_diff"] = round(diff, 2)
         result["board_box"] = list(box)
-        print(f"场上区域前后差异：{diff:.1f}（>0 说明有变化，是否真的放下随从"
-              "请比对 drag_before/after.png 人工确认）")
         result["needs_human_confirm"] = True
+        print(f"场上区域前后差异：{diff:.1f}（是否真的放下随从请比对 "
+              "drag_before/after.png 人工确认）")
     else:
         result["board_region_diff"] = None
         print("[WARN] 截图缺失，无法计算差异，请直接看保存的图片。")
@@ -750,32 +888,30 @@ def drag_probe(hwnd: int, out_dir: Path, transport: str = "post") -> dict:
 
 def print_summary(report: dict) -> None:
     verdict = report["verdict"]
-    print("\n========== 探针结论 ==========")
     caps = report.get("captures", {})
-    print(f"截图（PrintWindow 遮挡下活帧）："
-          f"{'PASS' if verdict['capture_ok'] else 'FAIL'} "
-          f"（black={caps.get('printwindow', {}).get('black')}, "
-          f"alive={caps.get('printwindow_alive', {}).get('alive')}, "
-          f"mode={caps.get('display_mode')}）")
-    for transport in TRANSPORTS:
-        rnd = report.get("click", {}).get(transport)
-        if rnd is None:
-            continue
-        print(f"点击 {transport.upper()}: open={rnd['open']['ok']} "
-              f"close={rnd['close']['ok']} esc={rnd['keyboard_esc_ok']}")
-    print(f"输入结论：{verdict['input_verdict']}")
-    print(f"键盘结论：{verdict['keyboard_verdict']}")
-    print(f"总体：{verdict['overall']}（best_transport={verdict['best_transport']}）")
+    rendering = caps.get("rendering", {})
+    print("\n========== 探针结论 ==========")
+    for key, label in (("foreground", "前台"), ("visible_unfocused", "可见失焦"),
+                       ("occluded", "被遮挡"), ("occluded_alpha", "遮挡+幽灵透明")):
+        state = rendering.get(key)
+        if state:
+            print(f"渲染[{label}]：alive={state['alive']} "
+                  f"max_diff={state['max_diff']}")
+    print(f"截图通道：{verdict['capture_verdict']}")
+    print(f"输入通道：{verdict['foreground_verdict']}")
+    print(f"后台点击：{verdict['background_verdict']}")
+    print(f"键盘：{verdict['keyboard_verdict']}")
+    print(f"总体：{verdict['overall']} —— {verdict['overall_note']}")
     print("把 probe_report.json 与 probe_out/*.png 按手册回传即可。")
 
 
 def main(argv: list[str] | None = None) -> int:
     _ensure_windows()
-    parser = argparse.ArgumentParser(description="炉石后台模式可行性探针")
+    parser = argparse.ArgumentParser(description="炉石后台模式可行性探针 v2")
     parser.add_argument("--drag", action="store_true",
                         help="追加拖牌探针（需先进练习模式）")
     parser.add_argument("--strategies", default=",".join(TRANSPORTS),
-                        help="要测的点击策略，逗号分隔：post,send,post_flick")
+                        help="要测的后台点击策略，逗号分隔：post,send,post_flick")
     parser.add_argument("--out", default="probe_out", help="输出目录")
     args = parser.parse_args(argv)
 
@@ -784,7 +920,7 @@ def main(argv: list[str] | None = None) -> int:
 
     hwnd = find_hs_hwnd()
     if not hwnd:
-        print("[FAIL] 没找到炉石窗口：请先启动游戏并停在主菜单。")
+        print("[FAIL] 没找到炉石窗口：请先启动游戏。")
         return 2
     meta = window_meta(hwnd)
     if meta["minimized"]:
@@ -796,19 +932,43 @@ def main(argv: list[str] | None = None) -> int:
     if not meta["is_admin"]:
         print("[提示] 当前不是管理员权限：若炉石以管理员运行，消息注入会被系统拦截。")
 
-    report: dict = {"meta": meta, "captures": {}, "click": {}, "drag": None}
+    report: dict = {"meta": meta, "captures": {}, "click_foreground": {},
+                    "click": {}, "drag": None}
 
-    print("\n请把炉石停在【主菜单】。")
-    _wait_enter("按回车开始探针（Ctrl+C 随时退出）")
-    report["captures"] = capture_probe(hwnd, out_dir)
+    print("\n主菜单/大厅 = 登录后有「对战模式 / 竞技场 / 酒馆战棋」大按钮、"
+          "右下角齿轮的界面。")
+    _wait_enter("请先登录炉石并停在大厅，然后在这里按回车")
+    ensure_main_menu(hwnd, out_dir)
+
+    pw_img, pw_ok = capture_printwindow(hwnd)
+    report["captures"]["printwindow"] = {
+        "ok": bool(pw_ok and pw_img is not None),
+        "black": bool(pw_img is None or capture_is_black(pw_img)),
+        "size": list(pw_img.shape[:2]) if pw_img is not None else None,
+    }
+    report["captures"]["display_mode"] = meta["display_mode"]
+    report["captures"]["window_dc"] = _capture_entry(*capture_window_dc(hwnd),
+                                                     "窗口DC BitBlt")
+    report["captures"]["desktop"] = _capture_entry(capture_desktop(), True,
+                                                   "桌面BitBlt")
+    save_png(pw_img, out_dir / "capture_printwindow.png")
+    save_png(capture_window_dc(hwnd)[0], out_dir / "capture_window_dc.png")
+    save_png(capture_desktop(), out_dir / "capture_desktop.png")
+
+    report["captures"]["rendering"] = rendering_probe(hwnd, out_dir)
+
+    report["click_foreground"] = foreground_input_probe(hwnd, out_dir)
 
     transports = [t.strip() for t in args.strategies.split(",") if t.strip()]
     for i, transport in enumerate(transports):
         if transport not in TRANSPORTS:
             print(f"[WARN] 未知策略 {transport}，跳过")
             continue
-        if i > 0:
-            _wait_enter("继续下一策略前，确认炉石停在主菜单，按回车继续")
+        _wait_enter("\n后台点击前：请先确认炉石在大厅（探针会再截一次图让你确认），"
+                    "然后把 cmd 完全盖住炉石 → 回车")
+        ensure_main_menu(hwnd, out_dir)
+        if not is_occluded(hwnd):
+            print("[提示] 当前未检测到遮挡：结果仍会记录，但请尽量盖严。")
         tag = f"click_{transport}"
         report["click"][transport] = click_probe_round(hwnd, transport,
                                                        out_dir, tag)
@@ -823,6 +983,15 @@ def main(argv: list[str] | None = None) -> int:
     print(f"\n报告已写入：{report_path}")
     print_summary(report)
     return 0
+
+
+def _capture_entry(img: np.ndarray | None, ok: bool, label: str) -> dict:
+    return {
+        "ok": bool(ok and img is not None),
+        "black": bool(img is None or capture_is_black(img)),
+        "size": list(img.shape[:2]) if img is not None else None,
+        "label": label,
+    }
 
 
 if __name__ == "__main__":

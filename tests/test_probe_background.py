@@ -112,6 +112,11 @@ class CoordinateTests(unittest.TestCase):
     def test_gear_point_uses_bottom_right_ref(self):
         self.assertEqual(probe.gear_point(1920, 1080), (1895, 1060))
 
+    def test_real_machine_resolution(self):
+        # 首轮实机：2048x1152，s≈1.0667
+        self.assertEqual(probe.ref_to_client(1895, 1060, 2048, 1152),
+                         (2021, 1131))
+
 
 class ImageJudgeTests(unittest.TestCase):
     @staticmethod
@@ -164,60 +169,154 @@ class ImageJudgeTests(unittest.TestCase):
         self.assertIsNone(probe.find_yellow_button(img))
 
 
+class AliveSummaryTests(unittest.TestCase):
+    def test_static_frames_are_not_alive(self):
+        frames = [np.full((50, 60, 3), 20, dtype=np.uint8)] * 3
+        summary = probe.alive_summary(frames)
+        self.assertEqual(summary["max_diff"], 0.0)
+        self.assertFalse(summary["alive"])
+        self.assertEqual(summary["frames"], 3)
+
+    def test_animated_frames_are_alive(self):
+        f1 = np.full((50, 60, 3), 20, dtype=np.uint8)
+        f2 = np.full((50, 60, 3), 80, dtype=np.uint8)
+        summary = probe.alive_summary([f1, f2, f1])
+        self.assertEqual(summary["max_diff"], 60.0)
+        self.assertTrue(summary["alive"])
+
+    def test_shape_mismatch_reports_not_alive(self):
+        f1 = np.zeros((50, 60, 3), dtype=np.uint8)
+        f2 = np.zeros((40, 60, 3), dtype=np.uint8)
+        summary = probe.alive_summary([f1, f2])
+        self.assertFalse(summary["alive"])
+        self.assertIsNone(summary["mean_diffs"])
+
+    def test_no_frames(self):
+        summary = probe.alive_summary([])
+        self.assertFalse(summary["alive"])
+        self.assertEqual(summary["max_diff"], 0.0)
+
+
 class VerdictTests(unittest.TestCase):
+    """v2 结论：渲染矩阵 + 前台对照 + 后台轮。"""
+
     @staticmethod
-    def _round(open_ok, close_ok, esc=None):
-        return {"open": {"ok": open_ok}, "close": {"ok": close_ok},
+    def _state(alive, max_diff=50.0):
+        return {"frames": 3, "mean_diffs": [max_diff, max_diff],
+                "max_diff": max_diff, "alive": alive}
+
+    def _report(self, *, pw_black=False, rendering=None, fg=None, bg=None):
+        return {
+            "captures": {
+                "printwindow": {"ok": not pw_black, "black": pw_black},
+                "rendering": rendering or {},
+            },
+            "click_foreground": fg or {},
+            "click": bg or {},
+            "drag": None,
+        }
+
+    @staticmethod
+    def _bg_round(open_ok, close_ok, esc=None):
+        return {"open": {"ok": open_ok, "attempts": []},
+                "close": {"ok": close_ok, "via": "yellow_button"},
                 "keyboard_esc_ok": esc}
 
     @staticmethod
-    def _report(click=None, capture_ok=True):
-        captures = {
-            "printwindow": {"ok": capture_ok, "black": not capture_ok},
-            "printwindow_alive": {"alive": capture_ok},
-        }
-        return {"captures": captures, "click": click or {}, "drag": None}
+    def _fg_entry(confirmed=False, measured=False):
+        return {"measured_open": measured, "user_confirmed": confirmed,
+                "open": {"ok": measured}, "close": {"ok": measured}}
 
-    def test_strategy_a_success_is_best(self):
-        report = self._report({"post": self._round(True, True, esc=False),
-                               "post_flick": self._round(True, True)})
+    def test_full_success_is_feasible(self):
+        report = self._report(
+            rendering={"occluded": self._state(True)},
+            fg={"post": self._fg_entry(measured=True)},
+            bg={"post": self._bg_round(True, True, esc=False)})
         verdict = probe.compute_verdict(report)
         self.assertEqual(verdict["overall"], "可行")
         self.assertEqual(verdict["best_transport"], "post")
-        self.assertIn("最优", verdict["input_verdict"])
+        self.assertIn("直接拿到活帧", verdict["capture_verdict"])
+        self.assertIn("被消费", verdict["foreground_verdict"])
         self.assertIn("未生效", verdict["keyboard_verdict"])
 
-    def test_falls_back_to_flick_when_post_fails(self):
-        report = self._report({"post": self._round(False, False),
-                               "post_flick": self._round(True, True)})
+    def test_alpha_only_alive_is_conditional(self):
+        report = self._report(
+            rendering={"foreground": self._state(True),
+                       "occluded": self._state(False, 0.2),
+                       "occluded_alpha": self._state(True)},
+            fg={"post": self._fg_entry(measured=True)})
         verdict = probe.compute_verdict(report)
-        self.assertEqual(verdict["best_transport"], "post_flick")
-        self.assertIn("瞬移", verdict["input_verdict"])
+        self.assertEqual(verdict["overall"], "有条件可行")
+        self.assertIn("ghost-alpha", verdict["capture_verdict"])
+        self.assertTrue(verdict["occluded_alive"])
 
-    def test_all_failed_is_not_feasible(self):
-        report = self._report({"post": self._round(False, False),
-                               "send": self._round(False, False),
-                               "post_flick": self._round(False, False)})
+    def test_foreground_control_failure_is_infeasible(self):
+        report = self._report(
+            rendering={"occluded": self._state(True)},
+            fg={"post": self._fg_entry(), "post_flick": self._fg_entry()},
+            bg={"post": self._bg_round(True, True)})
         verdict = probe.compute_verdict(report)
-        self.assertEqual(verdict["overall"], "待排查/不可行")
-        self.assertIsNone(verdict["best_transport"])
+        self.assertEqual(verdict["overall"], "不可行")
+        self.assertIn("不消费", verdict["foreground_verdict"])
+        self.assertIsNone(verdict["best_transport"])  # 后台结果不作数
 
-    def test_black_capture_blocks_verdict_even_if_input_works(self):
-        report = self._report({"post": self._round(True, True)},
-                              capture_ok=False)
+    def test_black_baseline_is_infeasible(self):
+        report = self._report(pw_black=True,
+                              rendering={"occluded": self._state(True)},
+                              fg={"post": self._fg_entry(measured=True)})
         verdict = probe.compute_verdict(report)
-        self.assertEqual(verdict["overall"], "待排查/不可行")
-        self.assertEqual(verdict["best_transport"], "post")  # 输入侧结论保留
+        self.assertEqual(verdict["overall"], "不可行")
+        self.assertIn("基线", verdict["capture_verdict"])
 
-    def test_keyboard_ok_when_any_round_closed_with_esc(self):
-        report = self._report({"post": self._round(True, True, esc=True)})
+    def test_occluded_dead_but_foreground_alive_hints_pause(self):
+        report = self._report(
+            rendering={"foreground": self._state(True),
+                       "occluded": self._state(False, 0.2)},
+            fg={"post": self._fg_entry(measured=True)})
         verdict = probe.compute_verdict(report)
-        self.assertIn("可用", verdict["keyboard_verdict"])
+        self.assertIn("暂停了渲染", verdict["capture_verdict"])
+        self.assertEqual(verdict["overall"], "有条件可行")
 
-    def test_keyboard_unknown_without_open(self):
-        report = self._report({})
+    def test_foreground_fallback_to_flick(self):
+        report = self._report(
+            rendering={"occluded": self._state(True)},
+            fg={"post": self._fg_entry(),
+                "post_flick": self._fg_entry(confirmed=True)})
         verdict = probe.compute_verdict(report)
-        self.assertIn("未测得", verdict["keyboard_verdict"])
+        self.assertIn("瞬移", verdict["foreground_verdict"])
+        self.assertEqual(verdict["overall"], "有条件可行")  # 后台轮还没跑
+
+    def test_user_confirmation_counts_as_open(self):
+        report = self._report(
+            rendering={"occluded": self._state(True)},
+            fg={"post": self._fg_entry(confirmed=True)},  # 截图差异没测到，肉眼看到
+            bg={"post": self._bg_round(True, True)})
+        verdict = probe.compute_verdict(report)
+        self.assertEqual(verdict["overall"], "可行")
+
+    def test_keyboard_verdicts(self):
+        base = dict(rendering={"occluded": self._state(True)},
+                    fg={"post": self._fg_entry(measured=True)})
+        esc_ok = probe.compute_verdict(
+            self._report(bg={"post": self._bg_round(True, True, esc=True)},
+                         **base))
+        self.assertIn("可用", esc_ok["keyboard_verdict"])
+        esc_fail = probe.compute_verdict(
+            self._report(bg={"post": self._bg_round(True, True, esc=False)},
+                         **base))
+        self.assertIn("未生效", esc_fail["keyboard_verdict"])
+        none_tested = probe.compute_verdict(self._report(**base))
+        self.assertIn("未测得", none_tested["keyboard_verdict"])
+
+    def test_background_prefers_post_then_send_then_flick(self):
+        base = dict(rendering={"occluded": self._state(True)},
+                    fg={"post": self._fg_entry(measured=True)})
+        report = self._report(
+            bg={"send": self._bg_round(True, True),
+                "post_flick": self._bg_round(True, True)},
+            **base)
+        self.assertEqual(probe.compute_verdict(report)["best_transport"],
+                         "send")
 
 
 if __name__ == "__main__":
