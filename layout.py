@@ -201,6 +201,43 @@ def map_point(x, y, anchor: str = ANCHOR_GAME) -> tuple[int, int]:
     return current().map_point(x, y, anchor)
 
 
+# ---------------------------------------------------------------- 运行期分辨率看门狗
+# 连续读到同一个“新尺寸”达到该次数才切换（防排他全屏切换显示模式时的瞬时抖动）。
+REFRESH_STABLE_READINGS = 2
+_pending_size: tuple[int, int] | None = None
+_pending_streak = 0
+
+
+def refresh_if_changed(provider=None) -> bool:
+    """运行期看门狗：主屏尺寸变化时自动重新映射。FSM 循环的安全点调用。
+
+    - 与当前布局尺寸一致 → False（无操作，并清空未确认的抖动计数）
+    - 读到不同尺寸 → 计入防抖；连续 ``REFRESH_STABLE_READINGS`` 次读到
+      同一个新尺寸才执行 ``auto_detect()`` 切换并返回 True
+    - 读不到尺寸（非 Windows / 调用失败）→ False
+
+    ``provider`` 供测试注入假尺寸源，默认实时查询 Win32。
+    """
+    global _pending_size, _pending_streak
+    size = (provider or _win32_screen_size)()
+    if size is None:
+        return False
+    if size == (current().width, current().height):
+        _pending_size, _pending_streak = None, 0
+        return False
+    if size == _pending_size:
+        _pending_streak += 1
+    else:
+        _pending_size, _pending_streak = size, 1
+    if _pending_streak < REFRESH_STABLE_READINGS:
+        return False
+    # 直接用已确认的尺寸构建布局（不二次查询，避免与 provider 结果竞态）。
+    width, height = _pending_size
+    set_layout(GameLayout(origin_x=0, origin_y=0, width=width, height=height))
+    _pending_size, _pending_streak = None, 0
+    return True
+
+
 def map_region(box, anchor: str = ANCHOR_GAME) -> tuple[int, int, int, int]:
     """便捷入口：按当前布局换算一个区域。"""
     return current().map_region(box, anchor)

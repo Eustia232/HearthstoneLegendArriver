@@ -243,6 +243,62 @@ class DetectedDesktopDpiTests(unittest.TestCase):
                                create=True, return_value=120):
             self.assertEqual(120, layout.detected_desktop_dpi())
 
+class RefreshIfChangedTests(unittest.TestCase):
+    """refresh_if_changed：运行期分辨率看门狗——连续 2 次读到新尺寸才切换。"""
+
+    def setUp(self):
+        layout.reset_layout()  # 回到 1920×1080 参考布局
+        # 清空看门狗的未确认抖动状态（模块私有，仅测试装配用）。
+        layout._pending_size, layout._pending_streak = None, 0
+
+    @staticmethod
+    def provider(*sizes):
+        seq = iter(sizes)
+        return lambda: next(seq)
+
+    def test_same_size_is_a_noop(self):
+        self.assertFalse(
+            layout.refresh_if_changed(self.provider((1920, 1080))))
+        self.assertEqual((0, 0, 1920, 1080), layout.current().rect())
+
+    def test_single_different_reading_does_not_switch(self):
+        self.assertFalse(layout.refresh_if_changed(
+            self.provider((2560, 1440), (1920, 1080))))
+        self.assertEqual((0, 0, 1920, 1080), layout.current().rect())
+
+    def test_two_consecutive_readings_switch(self):
+        self.assertFalse(
+            layout.refresh_if_changed(self.provider((2560, 1440))))
+        self.assertTrue(
+            layout.refresh_if_changed(self.provider((2560, 1440))))
+        self.assertEqual((0, 0, 2560, 1440), layout.current().rect())
+
+    def test_alternating_sizes_never_switch(self):
+        provider = self.provider((2560, 1440), (1280, 720),
+                                 (2560, 1440), (1280, 720))
+        for _ in range(4):
+            self.assertFalse(layout.refresh_if_changed(provider))
+        self.assertEqual((0, 0, 1920, 1080), layout.current().rect())
+
+    def test_unreadable_size_is_ignored(self):
+        self.assertFalse(
+            layout.refresh_if_changed(self.provider(None, None)))
+        self.assertEqual((0, 0, 1920, 1080), layout.current().rect())
+
+    def test_switch_back_to_previous_size_is_detected_again(self):
+        self.assertFalse(
+            layout.refresh_if_changed(self.provider((2560, 1440))))
+        self.assertTrue(
+            layout.refresh_if_changed(self.provider((2560, 1440))))
+        # 切换后稳定读旧尺寸 → False；再变回参考尺寸 → 重新防抖后切换。
+        self.assertFalse(
+            layout.refresh_if_changed(self.provider((2560, 1440))))
+        self.assertFalse(
+            layout.refresh_if_changed(self.provider((1920, 1080))))
+        self.assertTrue(
+            layout.refresh_if_changed(self.provider((1920, 1080))))
+        self.assertEqual((0, 0, 1920, 1080), layout.current().rect())
+
 
 if __name__ == "__main__":
     unittest.main()

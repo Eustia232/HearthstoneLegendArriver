@@ -213,6 +213,16 @@ def reset_game_session():
     global _concede_streak, _concede_last_turn, _concede_triggered
     global _concede_last_rate, _concede_last_check
     global _name_match_result
+    # 局间重检测分辨率：修复“每局重建了捕获配置但坐标映射仍旧”的不一致
+    #（看门狗覆盖对局中变化，这里覆盖恰好在局间发生的变化）。
+    old_layout = layout.current()
+    new_layout = layout.auto_detect()
+    if (new_layout.width, new_layout.height) != (old_layout.width,
+                                                 old_layout.height):
+        sys_print(f"[SYS] 局间检测到分辨率变化：{old_layout.width}×"
+                  f"{old_layout.height} → {new_layout.width}×"
+                  f"{new_layout.height}（坐标缩放比 {old_layout.scale:.3f} → "
+                  f"{new_layout.scale:.3f}），已重新映射")
     initialize_recommendation_automation()
     active_game_generation = log_state.game_generation
     choose_hero_count = 0
@@ -273,9 +283,38 @@ def init():
     _detected_layout = layout.auto_detect()
     sys_print(f"[SYS] 屏幕分辨率 {_detected_layout.width}×"
               f"{_detected_layout.height}，坐标缩放比 "
-              f"{_detected_layout.scale:.3f}（16:9 为精确支持）")
+              f"{_detected_layout.scale:.3f}，系统 DPI "
+              f"{layout.detected_desktop_dpi()}（16:9 为精确支持）")
     initialize_recommendation_automation()
     click.center_mouse()
+
+
+def check_resolution_change() -> bool:
+    """运行期分辨率看门狗：主屏尺寸变化 → 重新映射 + 重建捕获配置。
+
+    在状态机循环/各等待循环的“动作边界”调用（天然安全点）。防抖：连续
+    REFRESH_STABLE_READINGS 次读到同一新尺寸才切换（排他全屏切换显示
+    模式会有瞬时抖动）。切换后轻量重建 RecommendationConfig/DesktopCapture
+    （复用昂贵 OCR 组件），desktop_size/DPI 立即跟上新分辨率。
+
+    返回是否发生了切换（供日志/测试观察）。
+    """
+    old_layout = layout.current()
+    old_dpi = getattr(recommendation_config, "desktop_dpi", None)
+    if not layout.refresh_if_changed():
+        return False
+    new_layout = layout.current()
+    new_dpi = layout.detected_desktop_dpi()
+    sys_print(
+        f"[SYS] 检测到分辨率变化：{old_layout.width}×{old_layout.height} → "
+        f"{new_layout.width}×{new_layout.height}"
+        f"（坐标缩放比 {old_layout.scale:.3f} → {new_layout.scale:.3f}，"
+        f"系统 DPI {old_dpi if old_dpi is not None else '?'} → {new_dpi}），"
+        "已重新映射坐标并重建捕获配置")
+    initialize_recommendation_automation()
+    sys_print("[SYS] 提醒：盒子面板与AI胜率区域是桌面绝对坐标，"
+              "若盒子窗口位置变了请重新校准")
+    return True
 
 
 def update_log_state():
@@ -339,6 +378,7 @@ def wait_for_log_update(start_revision=None, timeout=2.0):
 def wait_until_battle_starts():
     loop_count = 0
     while True:
+        check_resolution_change()
         if not update_log_state():
             return FSM_ERROR
         if log_state.is_end:
@@ -454,6 +494,7 @@ def MatchingAction():
         if quitting_flag or stop_after_current_game:
             sys.exit(0)
 
+        check_resolution_change()
         time.sleep(STATE_CHECK_INTERVAL+random.random()+random.random()+random.random())
 
         click.run_hearthstone_action(click.commit_error_report)
@@ -527,6 +568,8 @@ def ChoosingCardAction():
             # 本局内随时可通过 request_cancel_stop_after_game 反悔。
             if quitting_flag:
                 sys.exit(0)
+            # 换牌等待期也可能横跨分辨率变化：动作边界处看门狗重适配。
+            check_resolution_change()
             fresh = refresh_snapshot()
             if fresh is None:
                 return FSM_ERROR
@@ -1242,6 +1285,8 @@ def AutoHS_automata():
     while 1:
         if quitting_flag:
             sys.exit(0)
+        # 分辨率看门狗：运行中改分辨率自动重映射（详见 check_resolution_change）。
+        check_resolution_change()
         # 每轮状态机分派前做一次存活检测（对局中还会检查 Power.log 是否停滞）：
         # 炉石进程消失/卡死时自动停止并醒目告警，不再空转到天亮。
         check_hearthstone_liveness()
