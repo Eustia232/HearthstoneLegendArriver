@@ -18,18 +18,28 @@ git push feat/background-mode ──► git pull
 
 ## 一、准备（Windows 机器，只需做一次）
 
-1. **Python 3.12 64 位**（与主项目要求一致，`python --version` 验证）。
+1. **uv**（家里电脑已装就跳过）：`winget install astral-sh.uv`
 2. 拉取分支：
    ```powershell
    git fetch origin
    git checkout feat/background-mode
    ```
-3. 依赖已装好（主项目环境直接复用）；若在新环境：
+3. 用 uv 建 Python 3.12 环境（本机没有 3.12 时 uv 会自动下载）：
    ```powershell
-   pip install -r requirements.txt
+   uv venv --python 3.12
    ```
-4. 启动炉石，停在**主菜单**（不用进对局）。
-5. **以管理员身份**打开 PowerShell，进入项目目录。
+   探针只依赖三个包，按需安装即可（比全量 requirements 快得多）：
+   ```powershell
+   uv pip install numpy Pillow pywin32
+   ```
+   想直接复用主项目全量环境也行：`uv pip install -r requirements.txt`
+   （paddle/paddleocr 很大，探针用不到，非必需）。
+4. **以管理员身份**打开 PowerShell，进入项目目录，用 `.venv` 里的解释器运行：
+   ```powershell
+   .venv\Scripts\Activate.ps1          # 激活后直接 python probe_background.py
+   # 或免激活等价写法：
+   uv run --no-project python probe_background.py
+   ```
 
 > 为什么要管理员：若炉石以更高权限运行，普通权限进程发的消息会被系统静默拦截。探针会自检并在报告里记录。
 
