@@ -54,6 +54,13 @@ class ClickSequenceTests(unittest.TestCase):
         self.assertLess(msgs.index(probe.WM_LBUTTONDOWN),
                         msgs.index(probe.WM_LBUTTONUP))
 
+    def test_hover_sequence_is_a_single_mousemove(self):
+        seq = probe.build_hover_sequence(123, 456)
+        self.assertEqual(len(seq), 1)
+        self.assertEqual(seq[0].msg, probe.WM_MOUSEMOVE)
+        self.assertEqual(seq[0].wparam, 0)
+        self.assertEqual(seq[0].client, (123, 456))
+
 
 class DragSequenceTests(unittest.TestCase):
     def test_sequence_shape_and_endpoints(self):
@@ -113,7 +120,7 @@ class CoordinateTests(unittest.TestCase):
         self.assertEqual(probe.gear_point(1920, 1080), (1895, 1060))
 
     def test_real_machine_resolution(self):
-        # 首轮实机：2048x1152，s≈1.0667
+        # 实机：2048x1152，s≈1.0667
         self.assertEqual(probe.ref_to_client(1895, 1060, 2048, 1152),
                          (2021, 1131))
 
@@ -131,6 +138,16 @@ class ImageJudgeTests(unittest.TestCase):
         a = self._solid(100, 200, 30)
         b = self._solid(100, 200, 90)
         self.assertTrue(probe.frames_alive(a, b))
+
+    def test_subtle_idle_animation_below_calibrated_threshold(self):
+        # 实测大厅空闲动画帧差 ≈0.05（少数像素轻微变化）；校准后的阈值 0.3
+        # 应把它判为「无变化」，而菜单打开（≈27）为「有变化」——差两个数量级
+        a = self._solid(100, 200, 30)
+        subtle = a.copy()
+        subtle[30:70, 80:120] = 33  # 1600/20000 像素 +3 → 均值差 0.24
+        self.assertLess(probe.mean_abs_diff(a, subtle), probe.ALIVE_DIFF_THRESHOLD)
+        self.assertFalse(probe.frames_alive(a, subtle))
+        self.assertTrue(probe.frames_alive(a, self._solid(100, 200, 90)))
 
     def test_frames_alive_rejects_shape_mismatch(self):
         self.assertFalse(probe.frames_alive(self._solid(10, 10),
@@ -175,7 +192,6 @@ class AliveSummaryTests(unittest.TestCase):
         summary = probe.alive_summary(frames)
         self.assertEqual(summary["max_diff"], 0.0)
         self.assertFalse(summary["alive"])
-        self.assertEqual(summary["frames"], 3)
 
     def test_animated_frames_are_alive(self):
         f1 = np.full((50, 60, 3), 20, dtype=np.uint8)
@@ -191,34 +207,84 @@ class AliveSummaryTests(unittest.TestCase):
         self.assertFalse(summary["alive"])
         self.assertIsNone(summary["mean_diffs"])
 
-    def test_no_frames(self):
-        summary = probe.alive_summary([])
-        self.assertFalse(summary["alive"])
-        self.assertEqual(summary["max_diff"], 0.0)
+
+class ObserveSummaryTests(unittest.TestCase):
+    """v3 核心：动作后多帧观察（呈现延迟证据 + settled 判定）。"""
+
+    @staticmethod
+    def _frame(value):
+        return np.full((40, 40, 3), value, dtype=np.uint8)
+
+    def test_change_detected_with_frame_index(self):
+        baseline = self._frame(30)
+        frames = [self._frame(30), self._frame(90), self._frame(90)]
+        obs = probe.observe_summary(baseline, frames)
+        self.assertTrue(obs["changed"])
+        self.assertEqual(obs["changed_at"], 2)  # 第 2 帧才出现 → 呈现延迟 1 个间隔
+        self.assertEqual(obs["max_diff"], 60.0)
+        self.assertFalse(obs["settled"])
+
+    def test_settled_when_back_to_baseline(self):
+        baseline = self._frame(30)
+        frames = [self._frame(31), self._frame(30), self._frame(30)]
+        obs = probe.observe_summary(baseline, frames)
+        self.assertFalse(obs["changed"])
+        self.assertTrue(obs["settled"])
+
+    def test_no_change_when_all_far_from_threshold(self):
+        baseline = self._frame(30)
+        obs = probe.observe_summary(baseline, [self._frame(31), self._frame(30)])
+        self.assertFalse(obs["changed"])
+        self.assertTrue(obs["settled"])
+
+    def test_shape_mismatch_frame_becomes_none_diff(self):
+        baseline = self._frame(30)
+        frames = [np.zeros((10, 10, 3), dtype=np.uint8), self._frame(90)]
+        obs = probe.observe_summary(baseline, frames)
+        self.assertIsNone(obs["diffs"][0])
+        self.assertEqual(obs["diffs"][1], 60.0)
+        self.assertTrue(obs["changed"])
+        self.assertEqual(obs["changed_at"], 2)
+
+    def test_empty_frames(self):
+        obs = probe.observe_summary(self._frame(30), [])
+        self.assertEqual(obs["n"], 0)
+        self.assertEqual(obs["max_diff"], 0.0)
+        self.assertFalse(obs["changed"])
+        self.assertFalse(obs["settled"])
+
+    def test_custom_threshold(self):
+        baseline = self._frame(30)
+        frames = [self._frame(35)]  # 差异 5
+        self.assertFalse(probe.observe_summary(baseline, frames)["changed"])
+        self.assertTrue(probe.observe_summary(
+            baseline, frames, threshold=3.0)["changed"])
 
 
 class VerdictTests(unittest.TestCase):
-    """v2 结论：渲染矩阵 + 前台对照 + 后台轮。"""
+    """v3 结论：自校验回路（行为证据）优先，alive 仅参考。"""
 
     @staticmethod
     def _state(alive, max_diff=50.0):
         return {"frames": 3, "mean_diffs": [max_diff, max_diff],
                 "max_diff": max_diff, "alive": alive}
 
-    def _report(self, *, pw_black=False, rendering=None, fg=None, bg=None):
+    def _report(self, *, pw_black=False, rendering=None, fg=None,
+                tickle=None, bg=None):
         return {
             "captures": {
                 "printwindow": {"ok": not pw_black, "black": pw_black},
                 "rendering": rendering or {},
             },
             "click_foreground": fg or {},
+            "tickle_test": tickle or {},
             "click": bg or {},
             "drag": None,
         }
 
     @staticmethod
     def _bg_round(open_ok, close_ok, esc=None):
-        return {"open": {"ok": open_ok, "attempts": []},
+        return {"open": {"ok": open_ok, "observe": {}},
                 "close": {"ok": close_ok, "via": "yellow_button"},
                 "keyboard_esc_ok": esc}
 
@@ -227,76 +293,81 @@ class VerdictTests(unittest.TestCase):
         return {"measured_open": measured, "user_confirmed": confirmed,
                 "open": {"ok": measured}, "close": {"ok": measured}}
 
-    def test_full_success_is_feasible(self):
+    def test_channel_verified_is_feasible(self):
         report = self._report(
-            rendering={"occluded": self._state(True)},
+            rendering={"occluded": self._state(False, 0.05)},  # alive 只是参考
             fg={"post": self._fg_entry(measured=True)},
             bg={"post": self._bg_round(True, True, esc=False)})
         verdict = probe.compute_verdict(report)
         self.assertEqual(verdict["overall"], "可行")
         self.assertEqual(verdict["best_transport"], "post")
-        self.assertIn("直接拿到活帧", verdict["capture_verdict"])
-        self.assertIn("被消费", verdict["foreground_verdict"])
+        self.assertIn("自校验通过", verdict["capture_verdict"])
         self.assertIn("未生效", verdict["keyboard_verdict"])
 
-    def test_alpha_only_alive_is_conditional(self):
+    def test_alive_is_informational_only(self):
+        # 渲染全灭（旧阈值口径）不再挡「可行」——行为证据优先
         report = self._report(
-            rendering={"foreground": self._state(True),
-                       "occluded": self._state(False, 0.2),
-                       "occluded_alpha": self._state(True)},
-            fg={"post": self._fg_entry(measured=True)})
+            rendering={"foreground": self._state(False, 0.05),
+                       "occluded": self._state(False, 0.05)},
+            fg={"post": self._fg_entry(measured=True)},
+            bg={"post": self._bg_round(True, True)})
+        verdict = probe.compute_verdict(report)
+        self.assertEqual(verdict["overall"], "可行")
+        self.assertIn("低于参考阈值", verdict["rendering_note"])
+
+    def test_tickle_only_is_conditional(self):
+        report = self._report(
+            fg={"post": self._fg_entry(measured=True)},
+            tickle={"changed": True, "region_max_diff": 5.0})
         verdict = probe.compute_verdict(report)
         self.assertEqual(verdict["overall"], "有条件可行")
-        self.assertIn("ghost-alpha", verdict["capture_verdict"])
-        self.assertTrue(verdict["occluded_alive"])
+        self.assertIn("hover", verdict["capture_verdict"])
+        self.assertIn("残留菜单", verdict["background_verdict"])
 
-    def test_foreground_control_failure_is_infeasible(self):
+    def test_bg_verify_overrides_fg_control_failure(self):
+        # v3 语义：自校验轮的 open/close 是多帧行为证据；前台对照只是单点
+        # y/n。两者矛盾时（前台 y/n 误答），以自校验为准，前台结论仅记录。
         report = self._report(
             rendering={"occluded": self._state(True)},
             fg={"post": self._fg_entry(), "post_flick": self._fg_entry()},
             bg={"post": self._bg_round(True, True)})
         verdict = probe.compute_verdict(report)
-        self.assertEqual(verdict["overall"], "不可行")
-        self.assertIn("不消费", verdict["foreground_verdict"])
-        self.assertIsNone(verdict["best_transport"])  # 后台结果不作数
+        self.assertEqual(verdict["overall"], "可行")
+        self.assertIn("不消费", verdict["foreground_verdict"])  # 数据保留
+        self.assertEqual(verdict["best_transport"], "post")
 
     def test_black_baseline_is_infeasible(self):
         report = self._report(pw_black=True,
-                              rendering={"occluded": self._state(True)},
-                              fg={"post": self._fg_entry(measured=True)})
+                              fg={"post": self._fg_entry(measured=True)},
+                              bg={"post": self._bg_round(True, True)})
         verdict = probe.compute_verdict(report)
         self.assertEqual(verdict["overall"], "不可行")
         self.assertIn("基线", verdict["capture_verdict"])
 
-    def test_occluded_dead_but_foreground_alive_hints_pause(self):
+    def test_fg_ok_without_bg_is_conditional(self):
         report = self._report(
-            rendering={"foreground": self._state(True),
-                       "occluded": self._state(False, 0.2)},
             fg={"post": self._fg_entry(measured=True)})
         verdict = probe.compute_verdict(report)
-        self.assertIn("暂停了渲染", verdict["capture_verdict"])
         self.assertEqual(verdict["overall"], "有条件可行")
+        self.assertIn("重跑", verdict["overall_note"])
 
     def test_foreground_fallback_to_flick(self):
         report = self._report(
-            rendering={"occluded": self._state(True)},
             fg={"post": self._fg_entry(),
                 "post_flick": self._fg_entry(confirmed=True)})
         verdict = probe.compute_verdict(report)
         self.assertIn("瞬移", verdict["foreground_verdict"])
-        self.assertEqual(verdict["overall"], "有条件可行")  # 后台轮还没跑
+        self.assertEqual(verdict["overall"], "有条件可行")
 
     def test_user_confirmation_counts_as_open(self):
         report = self._report(
-            rendering={"occluded": self._state(True)},
             fg={"post": self._fg_entry(confirmed=True)},  # 截图差异没测到，肉眼看到
             bg={"post": self._bg_round(True, True)})
         verdict = probe.compute_verdict(report)
         self.assertEqual(verdict["overall"], "可行")
 
     def test_keyboard_verdicts(self):
-        base = dict(rendering={"occluded": self._state(True)},
-                    fg={"post": self._fg_entry(measured=True)})
+        base = dict(fg={"post": self._fg_entry(measured=True)})
         esc_ok = probe.compute_verdict(
             self._report(bg={"post": self._bg_round(True, True, esc=True)},
                          **base))
@@ -309,12 +380,10 @@ class VerdictTests(unittest.TestCase):
         self.assertIn("未测得", none_tested["keyboard_verdict"])
 
     def test_background_prefers_post_then_send_then_flick(self):
-        base = dict(rendering={"occluded": self._state(True)},
-                    fg={"post": self._fg_entry(measured=True)})
         report = self._report(
+            fg={"post": self._fg_entry(measured=True)},
             bg={"send": self._bg_round(True, True),
-                "post_flick": self._bg_round(True, True)},
-            **base)
+                "post_flick": self._bg_round(True, True)})
         self.assertEqual(probe.compute_verdict(report)["best_transport"],
                          "send")
 

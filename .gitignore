@@ -27,4 +27,7 @@ image.png
 # cards.json 是核心数据文件，需要随仓库发布
 !cards.json
 
+# 后台探针报告需要随分支回传
+!probe_out/*.json
+
 reasonix.toml
