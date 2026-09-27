@@ -104,13 +104,20 @@ def _automation_state_with_revision():
     return snapshot, log_state.revision
 
 
-def initialize_recommendation_automation():
+def initialize_recommendation_automation(
+        desktop_size: tuple[int, int] | None = None,
+        desktop_dpi: int | None = None) -> None:
     """Rebuild per-game flows while reusing expensive OCR components.
 
     每次调用都会重新读取 ui_config.json 的 recommendation_roi（重建轻量的
     RecommendationConfig + DesktopCapture），因此用校准工具画完框后，直接重开
     对局/重启自动化即可生效，无需重启 web_ui。昂贵的 OCR 引擎（reader 与
     paddle backend）仍只创建一次、跨对局复用。
+
+    desktop_size / desktop_dpi：运行期重建（分辨率看门狗 / 局间重检测）时
+    传入实测值，优先于 ui_config 的 desktop_size/desktop_dpi 固定值——
+    否则旧固定值会让捕获校验一直拒绝新尺寸的帧（实测表现为换牌/出牌
+    连续 desktop_size 重试）。启动首建不传，保留“用户显式固定”的语义。
     """
     global auto_mulligan_flow, recommendation_flow
     global recommendation_config, recommendation_capture
@@ -118,7 +125,8 @@ def initialize_recommendation_automation():
     global mulligan_reader, recommendation_validator
 
     # 轻量：每次都重建，以便拾取校准后的最新 ROI / 尺寸配置。
-    recommendation_config = RecommendationConfig()
+    recommendation_config = RecommendationConfig(
+        desktop_size=desktop_size, desktop_dpi=desktop_dpi)
     recommendation_capture = DesktopCapture(recommendation_config)
 
     if recommendation_parser is None:
@@ -223,7 +231,9 @@ def reset_game_session():
                   f"{old_layout.height} → {new_layout.width}×"
                   f"{new_layout.height}（坐标缩放比 {old_layout.scale:.3f} → "
                   f"{new_layout.scale:.3f}），已重新映射")
-    initialize_recommendation_automation()
+    initialize_recommendation_automation(
+        desktop_size=(new_layout.width, new_layout.height),
+        desktop_dpi=layout.detected_desktop_dpi())
     active_game_generation = log_state.game_generation
     choose_hero_count = 0
     mulligan_delay_generation = None
@@ -311,7 +321,9 @@ def check_resolution_change() -> bool:
         f"（坐标缩放比 {old_layout.scale:.3f} → {new_layout.scale:.3f}，"
         f"系统 DPI {old_dpi if old_dpi is not None else '?'} → {new_dpi}），"
         "已重新映射坐标并重建捕获配置")
-    initialize_recommendation_automation()
+    initialize_recommendation_automation(
+        desktop_size=(new_layout.width, new_layout.height),
+        desktop_dpi=new_dpi)
     sys_print("[SYS] 提醒：盒子面板与AI胜率区域是桌面绝对坐标，"
               "若盒子窗口位置变了请重新校准")
     return True
