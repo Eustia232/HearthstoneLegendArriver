@@ -71,7 +71,7 @@
 
 ## 🖼️ 界面预览
 
-**Web 控制台**（`python web_ui.py` 后浏览器自动打开）
+**Web 控制台**（`uv run web_ui.py` 后浏览器自动打开）
 
 <img width="1180" alt="Web 控制台" src="docs/images/console.png" />
 
@@ -90,44 +90,37 @@
 <img width="1173" height="267" alt="image" src="https://github.com/user-attachments/assets/de4e12d7-f402-4bbd-ac9f-85c1d215c8f7" />
 
 
-## 🐍 详细安装（含 pip 与清华镜像）
+## 🐍 详细安装（uv 一键环境，无需手动配虚拟环境）
 
-> 需要 **Python 3.12**（自带 pip）。
+> 依赖与 Python 版本由 `pyproject.toml` / `uv.lock` / `.python-version` 锁定（Python 3.12.x）。
 
-### 1. 安装 Python 3.12
-- 到 <https://www.python.org/downloads/> 下载 **Python 3.12** 安装包（非常重要，当前出现多个安装成3.14导致无法识别的朋友，如果你后续的分辨率都是设置正确，脚本可以正确点击开始游戏但是进入游戏后卡在换牌且AI识别都无法正常工作，必须检查当前python的版本是否为3.12！）；
-- 安装时**务必勾选 "Add python.exe to PATH"**；
-- 装完在 PowerShell 运行 `python --version` 验证。
-
-### 2. 用清华 TUNA 镜像安装依赖
-**请把项目源代码下载到一个没有中文字符的路径下**
-**请把项目源代码下载到一个没有中文字符的路径下**
-**请把项目源代码下载到一个没有中文字符的路径下**
-在项目根目录右键打开 PowerShell，运行：
+### 1. 安装 uv（替代手动装 Python + pip 装依赖）
+PowerShell 运行：
 ```text
-pip install -r requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple
+powershell -c "irm https://astral.sh/uv/install.ps1 | iex"
 ```
-依赖较大（含 PaddleOCR / PaddlePaddle），耐心等待。
+装完重开一个 PowerShell，运行 `uv --version` 验证。uv 会在首次运行时**自动下载 Python 3.12** 并按 `uv.lock` 装好全部依赖（含 PaddleOCR / PaddlePaddle），不需要再手动建虚拟环境。
 
-### 3. 启动
-- **以管理员身份**运行：
-  win键搜索powershell，右键管理员身份运行，复制项目根目录的**绝对路径**（如果不会请找AI帮忙），输入以下命令
+### 2. 启动（首次自动配好一切）
+**请把项目源代码下载到一个没有中文字符的路径下**
+**请把项目源代码下载到一个没有中文字符的路径下**
+**请把项目源代码下载到一个没有中文字符的路径下**
+
+**以管理员身份**打开 PowerShell（win键搜索 powershell → 右键管理员身份运行），进入项目根目录后运行：
 ```text
 cd 项目根目录
+uv run web_ui.py
 ```
-powershell进入根目录以后输入
-
-```text
-python web_ui.py
-```
+- 首次运行会自动创建 `.venv`、安装锁定的依赖（依赖较大，耐心等待）；之后每次 `uv run` 都会自动校准环境，**再也不用手动配**。
+- 也可以直接双击项目里的 `HS.bat`（等价于 `uv run web_ui.py`）。
 - 浏览器会自动打开 `http://127.0.0.1:8765`（端口被占用会自动换，以控制台打印为准）。
 
-### 4. Windows 缩放任意（推荐 100%），炉石内游戏分辨率设成与桌面一致、显示模式全屏（重要！）
-### 5. 打开炉石传说和炉石盒子
-### 6. 炉石设置 → 选项 → 显示 → **显示模式 = 全屏**（**不要用最大化窗口**，详见开头「先看两条最容易忽略的配置」）
-### 7. 利用“校准推荐区域”功能对盒子UI的区域进行校正
+### 3. Windows 缩放任意（推荐 100%），炉石内游戏分辨率设成与桌面一致、显示模式全屏（重要！）
+### 4. 打开炉石传说和炉石盒子
+### 5. 炉石设置 → 选项 → 显示 → **显示模式 = 全屏**（**不要用最大化窗口**，详见开头「先看两条最容易忽略的配置」）
+### 6. 利用“校准推荐区域”功能对盒子UI的区域进行校正
 
-### 8. 看网页顶部的「🧪 环境自检」
+### 7. 看网页顶部的「🧪 环境自检」
 
 脚本**第一次启动时会自动自检一遍**，结果就在页面顶部的「🧪 环境自检」卡片里，每项一行：✅ 达标、⚠️ 与推荐值不同（还能跑）、❌ 缺失或不满足（**必须修**）。缺依赖会直接给 pip 命令，随时可点 [🔍 重新自检] 重跑。
 
@@ -298,7 +291,8 @@ AAEBAa35AwaPggPV0QP5xgXxoQb2oQbGsgcMzge1uQPQ4QOYkgWrkgWVygbXlweEmQekrQfWvgfZvgfP
 | 项目 | 要求 |
 | --- | --- |
 | 操作系统 | Windows |
-| Python | **3.12（64 位）**——自检会强制这一条：OCR 后端 paddlepaddle 2.6.2 没有 3.13+ 的轮子，3.10/3.11 也不在本项目实测范围内 |
+| Python | **3.12（64 位）**——由 uv 按 `.python-version` 自动安装，无需手动装；OCR 后端 paddlepaddle 2.6.2 没有 3.13+ 的轮子，3.10/3.11 也不在本项目实测范围内 |
+| uv | [安装 uv](https://docs.astral.sh/uv/)（一条命令），`uv run` 自动建好 `.venv` 并按 `uv.lock` 装依赖 |
 | 炉石传说 | 已安装 |
 | 炉石盒子 | 已安装，简体中文 |
 | 桌面 / 炉石分辨率 | 任意（推荐 16:9；坐标自动换算，非 16:9 为实验性支持） |
@@ -310,8 +304,8 @@ AAEBAa35AwaPggPV0QP5xgXxoQb2oQbGsgcMzge1uQPQ4QOYkgWrkgWVygbXlweEmQekrQfWvgfZvgfP
 
 | 检查项 | 怎么判 |
 | --- | --- |
-| Python 版本 | 必须 **3.12 的 64 位**：装了别的版本（尤其 3.13/3.14）会直接判 ❌ 并给出建环境命令 |
-| 依赖包 | 逐个 import 一遍，并和 `requirements.txt` 的版本比对；缺哪个直接给 `pip install` 命令 |
+| Python 版本 | 必须 **3.12 的 64 位**：装了别的版本（尤其 3.13/3.14）会直接判 ❌ 并给出修复命令（推荐直接用 uv，会自动装对） |
+| 依赖包 | 逐个 import 一遍，并和 `pyproject.toml` 的固定版本比对；缺哪个直接给 `uv sync` 命令（一键按 `uv.lock` 装齐/校准） |
 | 管理员权限 | 不是管理员 → 鼠标/键盘点击会被系统拦掉（现象就是「脚本在跑但点了没反应」） |
 | 屏幕分辨率 / 缩放 | 分辨率任意（推荐 16:9），须与 `ui_config.json` 的 `desktop_size` 一致；缩放任意（DPI 感知），100% 为推荐值 |
 | 炉石窗口 | 没开只算 ⚠️（点「开始运行」会先拉起战网和炉石） |

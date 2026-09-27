@@ -8,7 +8,7 @@
 
 每一项给三种结论，页面/控制台上直接显示图标：
     ✅ ok    达标；
-    ⚠️ warn  能跑，但与推荐值不一致（例如依赖版本和 requirements.txt 不同、
+    ⚠️ warn  能跑，但与推荐值不一致（例如依赖版本和 pyproject.toml 不同、
              炉石没开、日志目录里还没有 Power.log）；
     ❌ fail  必需项缺失/不满足，脚本很可能跑不起来或点了没反应，必须修。
 
@@ -35,7 +35,8 @@ from typing import Callable, Optional
 import layout
 
 ROOT = Path(__file__).resolve().parent
-REQUIREMENTS_PATH = ROOT / "requirements.txt"
+PYPROJECT_PATH = ROOT / "pyproject.toml"
+REQUIREMENTS_PATH = ROOT / "requirements.txt"  # 旧版兼容回退（uv 迁移前）
 UI_CONFIG_PATH = ROOT / "ui_config.json"
 
 # ---------------------------------------------------------------- 结论常量
@@ -47,8 +48,9 @@ STATUS_ICON = {STATUS_OK: "✅", STATUS_WARN: "⚠️", STATUS_FAIL: "❌"}
 # ---------------------------------------------------------------- Python 版本
 EXPECTED_PYTHON = (3, 12)
 PYTHON_HINT = (
-    "请装 Python 3.12（64 位）：conda create -n HTL python=3.12 -y && "
-    "conda activate HTL，再执行 pip install -r requirements.txt。"
+    "安装 uv（PowerShell：powershell -c \"irm https://astral.sh/uv/install.ps1 | iex\"），"
+    "然后在项目根目录以管理员身份运行 uv run web_ui.py：首次会自动装好 "
+    "Python 3.12 与全部依赖，无需手动配虚拟环境。"
     "不要用 3.11 及以下，也不要用 3.13 及以上（OCR 依赖没有对应轮子）。")
 
 # ---------------------------------------------------------------- 依赖清单
@@ -79,6 +81,9 @@ DEPENDENCIES: tuple[dict, ...] = (
 
 _PIN_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*==\s*([^\s;]+)")
 
+# 依赖修复的统一命令：uv 按 uv.lock 一键装齐/校准（web_ui 首次 uv run 也会自动做）。
+UV_SYNC_HINT = "uv sync（项目根目录执行，按 uv.lock 一键装齐/校准依赖）"
+
 
 # ---------------------------------------------------------------- 工具函数
 def _normalize(name: str) -> str:
@@ -102,17 +107,53 @@ def _dist_version(dist_names) -> Optional[str]:
     return None
 
 
-def _requirements_pins(text: Optional[str] = None) -> dict[str, str]:
-    """解析 requirements.txt 的 ``包名==版本`` 固定值，供版本比对用。
+def _pyproject_dependency_lines() -> list[str]:
+    """读取 pyproject.toml 的 [project].dependencies（uv 依赖的单一来源）。
 
-    解析不到（文件缺失/格式变了）就返回空字典，此时只检查能不能导入，
-    不比对版本 —— 自检本身不能因为解析失败而报错。
+    py3.12 运行时用 tomllib 精确解析；旧解释器（无 tomllib）退化为从文本
+    抓 dependencies = [ ... ] 段的引号项，保证自检在任意环境都能拿到固定值。
     """
-    if text is None:
-        try:
-            text = REQUIREMENTS_PATH.read_text(encoding="utf-8")
-        except Exception:
-            return {}
+    try:
+        text = PYPROJECT_PATH.read_text(encoding="utf-8")
+    except Exception:
+        return []
+    try:
+        import tomllib
+        deps = tomllib.loads(text).get("project", {}).get("dependencies", [])
+        return [str(dep) for dep in deps]
+    except ModuleNotFoundError:
+        match = re.search(r"^dependencies\s*=\s*\[(.*?)^\]", text, re.S | re.M)
+        if not match:
+            return []
+        return re.findall(r'"([^"\n]+)"', match.group(1))
+    except Exception:
+        return []
+
+
+def _requirements_pins(text: Optional[str] = None) -> dict[str, str]:
+    """解析依赖固定值（``包名==版本``），供版本比对用。
+
+    依赖清单已迁移到 pyproject.toml（uv.lock 锁定）；显式传入 text 时按
+    纯文本解析（测试/旧 requirements.txt 兼容）。解析不到就返回空字典，
+    此时只检查能不能导入、不比对版本 —— 自检本身不能因解析失败而报错。
+    """
+    if text is not None:
+        return _parse_pin_lines(text)
+    pins: dict[str, str] = {}
+    for dep in _pyproject_dependency_lines():
+        match = _PIN_RE.match(dep)
+        if match:
+            pins[_normalize(match.group(1))] = match.group(2)
+    if pins:
+        return pins
+    try:
+        return _parse_pin_lines(REQUIREMENTS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _parse_pin_lines(text: str) -> dict[str, str]:
+    """逐行抓 ``包名==版本``（忽略注释与无关行）。"""
     pins: dict[str, str] = {}
     for line in str(text).splitlines():
         match = _PIN_RE.match(line)
@@ -154,7 +195,7 @@ def python_item(version: Optional[tuple] = None,
 def dependency_items(importer: Callable[[str], object] = importlib.import_module,
                      version_reader: Callable[[tuple], Optional[str]] = None,
                      pins: Optional[dict[str, str]] = None) -> list[dict]:
-    """逐个 import 依赖包，并和 requirements.txt 的版本做比对。"""
+    """逐个 import 依赖包，并和 pyproject.toml 的固定版本做比对。"""
     version_reader = version_reader or _dist_version
     pins = _requirements_pins() if pins is None else pins
     items: list[dict] = []
@@ -179,14 +220,14 @@ def dependency_items(importer: Callable[[str], object] = importlib.import_module
                 items.append(_item(
                     _normalize(dists[0]), label, STATUS_FAIL,
                     f"没装 {dists[0]}（找不到发行包元数据）",
-                    ("pip install -r requirements.txt" if required else
-                     f"可选依赖，需要的话 pip install {dists[0]}"), required,
+                    ("uv sync" if required else
+                     f"可选依赖；执行 uv sync 会一并装上 {dists[0]}"), required,
                     purpose))
             elif (pinned := _pinned_version(dists, pins)) and str(version) != str(pinned):
                 items.append(_item(
                     _normalize(dists[0]), label, STATUS_WARN,
-                    f"已安装 {version}，requirements.txt 要求 {pinned}",
-                    f"pip install {dists[0]}=={pinned}", required, purpose))
+                    f"已安装 {version}，pyproject.toml 要求 {pinned}",
+                    f"执行 uv sync 校准到固定版本 {pinned}", required, purpose))
             else:
                 items.append(_item(_normalize(dists[0]), label, STATUS_OK,
                                    f"已安装 {version}", "", required, purpose))
@@ -202,9 +243,8 @@ def dependency_items(importer: Callable[[str], object] = importlib.import_module
                 error = exc
                 break
         if failed_module is not None:
-            hint = (f"pip install -r requirements.txt"
-                    if required else
-                    f"可选依赖，缺了不影响出牌；需要的话 pip install {dists[0]}")
+            hint = (UV_SYNC_HINT if required else
+                    f"可选依赖，缺了不影响出牌；uv sync 会一并装上 {dists[0]}")
             items.append(_item(
                 _normalize(dists[0]), label, STATUS_FAIL,
                 f"导入 {failed_module} 失败：{type(error).__name__}: {error}",
@@ -219,8 +259,8 @@ def dependency_items(importer: Callable[[str], object] = importlib.import_module
         elif pinned and str(version) != str(pinned):
             items.append(_item(
                 _normalize(dists[0]), label, STATUS_WARN,
-                f"已安装 {version}，requirements.txt 要求 {pinned}",
-                f"如需与实测环境一致：pip install {dists[0]}=={pinned}", required,
+                f"已安装 {version}，pyproject.toml 要求 {pinned}",
+                f"如需与实测环境一致：执行 uv sync 校准到 {pinned}", required,
                 purpose))
         else:
             items.append(_item(
