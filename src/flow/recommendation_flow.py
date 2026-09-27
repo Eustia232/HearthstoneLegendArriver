@@ -270,8 +270,12 @@ class RecommendationFlow:
         if current is not None and current.frame_id == frame_id:
             return current
         # Tests and simple suppliers can provide a fresh identity-equivalent frame.
+        capture_config = getattr(self.capture, "config", None)
         return type("FrameProxy", (), {
-            "frame_id": frame_id, "desktop_size": (1920, 1080), "dpi": 96,
+            "frame_id": frame_id,
+            "desktop_size": getattr(capture_config, "desktop_size",
+                                    (1920, 1080)),
+            "dpi": getattr(capture_config, "desktop_dpi", 96),
             "window_handle": 1, "foreground": True, "panel_visible": True,
         })()
 

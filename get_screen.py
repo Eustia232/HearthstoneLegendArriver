@@ -13,6 +13,7 @@ import numpy
 from print_info import *
 
 from constants.constants import *
+import layout
 
 
 HEARTHSTONE_BOX_TITLE_MARKERS = (
@@ -187,26 +188,34 @@ def catch_screen(name=None, frame_grabber=None):
     return im_opencv
 
 
+# 阶段判定规则（按顺序采样，命中即返回）：判定点坐标登记在
+# layout.STATE_PROBE_POINTS（经 layout 换算到当前分辨率），RGB 为
+# 1920×1080 实测值。匹配用 3×3 邻域 + 每通道容差 4（layout.sample_matches）：
+# 其他分辨率下渲染缩放会让采样像素有轻微漂移；容差 4 小于状态调色板两两
+# 最小通道差 9，不会互相误判。1920×1080 全屏时坐标为恒等，行为与旧版一致。
+_STATE_PROBE_RULES = (
+    # (状态, 判定点 key, 期望 RGB 变体——同一判定点可命中多种画面)
+    (FSM_MAIN_MENU, "probe_main", ((23, 52, 105), (20, 51, 104))),
+    (FSM_MAIN_MENU, "probe_main_alt", ((21, 43, 95),)),
+    (FSM_CHOOSING_HERO, "probe_main", ((8, 18, 24),)),
+    (FSM_MATCHING, "probe_main", ((17, 18, 19),)),
+    (FSM_CHOOSING_CARD, "probe_mulligan", ((71, 71, 71),)),
+)
+
+
 def get_state():
     hwnd = get_HS_hwnd()
     if hwnd == 0:
         return FSM_LEAVE_HS
 
     im_opencv = catch_screen()
+    if im_opencv is None:
+        return FSM_LEAVE_HS
 
-    # print("当前定位点------------")
-    # print(im_opencv[1070][1090][:3])
-    # 先y轴再z轴
-    if list(im_opencv[1070][1090][:3]) == [23, 52, 105] or \
-            list(im_opencv[305][705][:3]) == [21, 43, 95] or \
-            list(im_opencv[1070][1090][:3]) == [20, 51, 104]:   # 万圣节主界面会变
-        return FSM_MAIN_MENU
-    if list(im_opencv[1070][1090][:3]) == [8, 18, 24]:
-        return FSM_CHOOSING_HERO
-    if list(im_opencv[1070][1090][:3]) == [17, 18, 19]:
-        return FSM_MATCHING
-    if list(im_opencv[860][960][:3]) == [71, 71, 71]:
-        return FSM_CHOOSING_CARD
+    for state, probe_key, expected in _STATE_PROBE_RULES:
+        x, y = layout.probe_point(probe_key)
+        if layout.sample_matches(im_opencv, x, y, expected):
+            return state
 
     return FSM_BATTLING
 

@@ -1,0 +1,25 @@
+[project]
+# HSLegendArriver 是“脚本型应用”，不是要发布/安装的库：
+# [tool.uv] package=false 时，uv run / uv sync 只管依赖，不打包本项目本身。
+name = "hslegendarriver"
+version = "0.1.0"
+description = "HSLegendArriver：炉石传说自动化脚本（Power.log 状态机 + 盒子推荐 OCR）"
+# OCR 依赖（paddlepaddle/paddleocr）只提供到 3.12 的轮子，锁死 3.12.x。
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "click==8.4.2",
+    "keyboard==0.13.5",
+    "numpy==2.5.2",
+    "opencv-python-headless==4.10.0.84",
+    "paddleocr==2.10.0",
+    "paddlepaddle==2.6.2",
+    "Pillow==12.3.0",
+    "psutil==7.2.2",
+    "pynput==1.8.2",
+    "pywin32==312; sys_platform == 'win32'",
+    "Requests==2.34.2",
+    "setuptools==84.0.0",
+]
+
+[tool.uv]
+package = false

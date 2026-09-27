@@ -2,6 +2,7 @@
 __pycache__/
 .pytest_cache/
 .dsh-shots/
+.worktree/
 venv/
 .venv/
 .venv-release/

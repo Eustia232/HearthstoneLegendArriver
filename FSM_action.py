@@ -9,8 +9,10 @@ import keyboard
 
 import click
 import get_screen
+import layout
 from config import (
     DEFAULT_AUTO_CONCEDE, SNAPSHOT_WRITE_INTERVAL, human_like_settings,
+    win_rate_regions,
 )
 from manual_controller import (
     ClickExecutor, GlobalHotkeyInput, ManualController,
@@ -102,13 +104,20 @@ def _automation_state_with_revision():
     return snapshot, log_state.revision
 
 
-def initialize_recommendation_automation():
+def initialize_recommendation_automation(
+        desktop_size: tuple[int, int] | None = None,
+        desktop_dpi: int | None = None) -> None:
     """Rebuild per-game flows while reusing expensive OCR components.
 
     每次调用都会重新读取 ui_config.json 的 recommendation_roi（重建轻量的
     RecommendationConfig + DesktopCapture），因此用校准工具画完框后，直接重开
     对局/重启自动化即可生效，无需重启 web_ui。昂贵的 OCR 引擎（reader 与
     paddle backend）仍只创建一次、跨对局复用。
+
+    desktop_size / desktop_dpi：运行期重建（分辨率看门狗 / 局间重检测）时
+    传入实测值，优先于 ui_config 的 desktop_size/desktop_dpi 固定值——
+    否则旧固定值会让捕获校验一直拒绝新尺寸的帧（实测表现为换牌/出牌
+    连续 desktop_size 重试）。启动首建不传，保留“用户显式固定”的语义。
     """
     global auto_mulligan_flow, recommendation_flow
     global recommendation_config, recommendation_capture
@@ -116,7 +125,8 @@ def initialize_recommendation_automation():
     global mulligan_reader, recommendation_validator
 
     # 轻量：每次都重建，以便拾取校准后的最新 ROI / 尺寸配置。
-    recommendation_config = RecommendationConfig()
+    recommendation_config = RecommendationConfig(
+        desktop_size=desktop_size, desktop_dpi=desktop_dpi)
     recommendation_capture = DesktopCapture(recommendation_config)
 
     if recommendation_parser is None:
@@ -139,8 +149,11 @@ def initialize_recommendation_automation():
         mulligan_reader = StableRecommendationReader(
             recommendation_config, recommendation_reader.backend,
             text_normalizer=recommendation_parser.normalize_action_text)
-        recommendation_validator = RecommendationValidator(
-            recommendation_config)
+    # 校验器必须随每次重建换绑最新 config：它逐帧比对 desktop_size/dpi，
+    # 若沿用首建时的旧 config，分辨率看门狗切换后所有新帧都会被拒
+    #（实测表现：换牌/出牌 desktop_size 无限重试，直到改回旧分辨率）。
+    # 校验器本身只持有配置引用，重建是零成本的。
+    recommendation_validator = RecommendationValidator(recommendation_config)
 
     def read_mulligan_action():
         # 换牌面板是否在场，由 OCR 证据裁定：识别出的文本必须能解析出
@@ -211,7 +224,19 @@ def reset_game_session():
     global _concede_streak, _concede_last_turn, _concede_triggered
     global _concede_last_rate, _concede_last_check
     global _name_match_result
-    initialize_recommendation_automation()
+    # 局间重检测分辨率：修复“每局重建了捕获配置但坐标映射仍旧”的不一致
+    #（看门狗覆盖对局中变化，这里覆盖恰好在局间发生的变化）。
+    old_layout = layout.current()
+    new_layout = layout.auto_detect()
+    if (new_layout.width, new_layout.height) != (old_layout.width,
+                                                 old_layout.height):
+        sys_print(f"[SYS] 局间检测到分辨率变化：{old_layout.width}×"
+                  f"{old_layout.height} → {new_layout.width}×"
+                  f"{new_layout.height}（坐标缩放比 {old_layout.scale:.3f} → "
+                  f"{new_layout.scale:.3f}），已重新映射")
+    initialize_recommendation_automation(
+        desktop_size=(new_layout.width, new_layout.height),
+        desktop_dpi=layout.detected_desktop_dpi())
     active_game_generation = log_state.game_generation
     choose_hero_count = 0
     mulligan_delay_generation = None
@@ -266,8 +291,45 @@ def init():
     except Exception:
         pass
     shutdown_event.clear()
+    # 分辨率检测：所有 1920×1080 参考坐标经 layout 映射到当前主屏
+    # （1920×1080 全屏 = 恒等映射，行为不变；其他分辨率等比换算）。
+    _detected_layout = layout.auto_detect()
+    sys_print(f"[SYS] 屏幕分辨率 {_detected_layout.width}×"
+              f"{_detected_layout.height}，坐标缩放比 "
+              f"{_detected_layout.scale:.3f}，系统 DPI "
+              f"{layout.detected_desktop_dpi()}（16:9 为精确支持）")
     initialize_recommendation_automation()
     click.center_mouse()
+
+
+def check_resolution_change() -> bool:
+    """运行期分辨率看门狗：主屏尺寸变化 → 重新映射 + 重建捕获配置。
+
+    在状态机循环/各等待循环的“动作边界”调用（天然安全点）。防抖：连续
+    REFRESH_STABLE_READINGS 次读到同一新尺寸才切换（排他全屏切换显示
+    模式会有瞬时抖动）。切换后轻量重建 RecommendationConfig/DesktopCapture
+    （复用昂贵 OCR 组件），desktop_size/DPI 立即跟上新分辨率。
+
+    返回是否发生了切换（供日志/测试观察）。
+    """
+    old_layout = layout.current()
+    old_dpi = getattr(recommendation_config, "desktop_dpi", None)
+    if not layout.refresh_if_changed():
+        return False
+    new_layout = layout.current()
+    new_dpi = layout.detected_desktop_dpi()
+    sys_print(
+        f"[SYS] 检测到分辨率变化：{old_layout.width}×{old_layout.height} → "
+        f"{new_layout.width}×{new_layout.height}"
+        f"（坐标缩放比 {old_layout.scale:.3f} → {new_layout.scale:.3f}，"
+        f"系统 DPI {old_dpi if old_dpi is not None else '?'} → {new_dpi}），"
+        "已重新映射坐标并重建捕获配置")
+    initialize_recommendation_automation(
+        desktop_size=(new_layout.width, new_layout.height),
+        desktop_dpi=new_dpi)
+    sys_print("[SYS] 提醒：盒子面板与AI胜率区域是桌面绝对坐标，"
+              "若盒子窗口位置变了请重新校准")
+    return True
 
 
 def update_log_state():
@@ -331,6 +393,7 @@ def wait_for_log_update(start_revision=None, timeout=2.0):
 def wait_until_battle_starts():
     loop_count = 0
     while True:
+        check_resolution_change()
         if not update_log_state():
             return FSM_ERROR
         if log_state.is_end:
@@ -446,6 +509,7 @@ def MatchingAction():
         if quitting_flag or stop_after_current_game:
             sys.exit(0)
 
+        check_resolution_change()
         time.sleep(STATE_CHECK_INTERVAL+random.random()+random.random()+random.random())
 
         click.run_hearthstone_action(click.commit_error_report)
@@ -519,6 +583,8 @@ def ChoosingCardAction():
             # 本局内随时可通过 request_cancel_stop_after_game 反悔。
             if quitting_flag:
                 sys.exit(0)
+            # 换牌等待期也可能横跨分辨率变化：动作边界处看门狗重适配。
+            check_resolution_change()
             fresh = refresh_snapshot()
             if fresh is None:
                 return FSM_ERROR
@@ -816,8 +882,11 @@ def confirm_button_present() -> bool:
 
 
 # ---------------------------------------------------------------- 自动投降检测
-# 盒子浮动条“AI胜率 X%”的截图区域（1920x1080 实测）：主区域 + 放宽的兜底区域。
-_AI_WIN_RATE_REGIONS = ((110, 8, 270, 48), (95, 0, 300, 60))
+# 盒子浮动条“AI胜率 X%”的检测区域：桌面绝对像素（盒子 UI 与游戏分辨率无关），
+# 默认为 1920×1080 实测值（layout），可在 ui_config.json 覆盖
+# （ai_win_rate_roi / ai_win_rate_wide_roi，经 config.win_rate_regions() 读取；
+# screen_regions.py 与本表同源，test_screen_regions.py 校验两边一致）。
+_AI_WIN_RATE_REGIONS = tuple(win_rate_regions())
 # 浮动条字号很小，放大后再送 OCR，识别率明显更高。
 _AI_WIN_RATE_SCALE = 2.0
 # 同一回合内 OCR 读不到时的重试次数与间隔：盒子浮动条常常要等面板画好才出现，
@@ -875,7 +944,7 @@ def read_ai_win_rate():
         from PIL import ImageGrab
     except Exception:
         return None
-    for index, box in enumerate(_AI_WIN_RATE_REGIONS):
+    for index, box in enumerate(win_rate_regions()):
         try:
             rgb = np.asarray(ImageGrab.grab(bbox=box, all_screens=False))
             img = cv2.cvtColor(rgb, cv2.COLOR_RGB2BGR)
@@ -1056,6 +1125,9 @@ def Battling():
     while True:
         if quitting_flag:
             sys.exit(0)
+        # 对局内分辨率看门狗：整局都在本循环里打转（外层主循环不执行），
+        # 中途改分辨率只能在这里检测，否则整个对局期间都不会重适配。
+        check_resolution_change()
         # 对局中每轮都做存活检测：炉石闪退/卡死时这里会自动停止，
         # 不会再对着失效画面一直重试 OCR。
         check_hearthstone_liveness()
@@ -1231,6 +1303,8 @@ def AutoHS_automata():
     while 1:
         if quitting_flag:
             sys.exit(0)
+        # 分辨率看门狗：运行中改分辨率自动重映射（详见 check_resolution_change）。
+        check_resolution_change()
         # 每轮状态机分派前做一次存活检测（对局中还会检查 Power.log 是否停滞）：
         # 炉石进程消失/卡死时自动停止并醒目告警，不再空转到天亮。
         check_hearthstone_liveness()
@@ -1250,6 +1324,8 @@ def AutoHS_automata():
 
 
 if __name__ == "__main__":
+    # 直接 python FSM_action.py 的遗留入口：同样先声明 DPI 感知。
+    layout.enable_dpi_awareness()
     keyboard.add_hotkey("ctrl+q", system_exit)
 
     init()

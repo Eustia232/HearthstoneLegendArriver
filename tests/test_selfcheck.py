@@ -44,15 +44,24 @@ class PythonVersionTests(unittest.TestCase):
 
 
 class DependencyManifestTests(unittest.TestCase):
-    def test_requirements_pins_are_parsed(self):
+    def test_pyproject_pins_are_parsed(self):
+        """依赖清单已迁移到 pyproject.toml（uv.lock 单一来源）。"""
         pins = selfcheck._requirements_pins()
 
         self.assertEqual("2.6.2", pins["paddlepaddle"])
         self.assertEqual("2.5.2", pins["numpy"])
         self.assertEqual("8.4.2", pins["click"])
+        self.assertEqual("312", pins["pywin32"])
+
+    def test_pyproject_dependency_block_parses_without_tomllib(self):
+        """无 tomllib 的解释器也能从文本段解析（与 py3.12 运行时行为一致）。"""
+        pins = selfcheck._requirements_pins()
+
+        self.assertTrue(pins)
+        self.assertIn("paddleocr", pins)
 
     def test_manifest_covers_every_requirement(self):
-        """requirements.txt 里每个包都要能在自检清单里看到（不许漏检）。"""
+        """pyproject.toml 里每个包都要能在自检清单里看到（不许漏检）。"""
         pins = selfcheck._requirements_pins()
         covered = {selfcheck._normalize(dist)
                    for spec in selfcheck.DEPENDENCIES for dist in spec["dist"]}
@@ -83,7 +92,7 @@ class DependencyManifestTests(unittest.TestCase):
 
 
 class DependencyItemTests(unittest.TestCase):
-    def test_missing_package_fails_with_pip_hint(self):
+    def test_missing_package_fails_with_uv_sync_hint(self):
         def importer(name):
             if name == "paddleocr":
                 raise ImportError("No module named 'paddleocr'")
@@ -96,7 +105,7 @@ class DependencyItemTests(unittest.TestCase):
 
         self.assertEqual(selfcheck.STATUS_FAIL, item["status"])
         self.assertIn("ImportError", item["detail"])
-        self.assertIn("pip install", item["hint"])
+        self.assertIn("uv sync", item["hint"])
 
     def test_version_mismatch_warns_but_still_counts_as_usable(self):
         items = selfcheck.dependency_items(importer=lambda name: object(),

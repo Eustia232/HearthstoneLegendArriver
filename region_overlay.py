@@ -327,7 +327,9 @@ class RegionBoxOverlay:
         panel_state = None
         next_panel_check = 0.0
         esc_held = False
-        # 区域坐标一帧都不该重读配置文件：进来读一次，之后复用。
+        # 区域坐标不逐帧重读配置文件：与面板判定同频（默认 1.5s）刷新一次。
+        # 这样分辨率变化（换牌确认按钮等 ROI 在配置构建时按当时分辨率烘焙）
+        # 与重新校准的结果都能在 ~1.5s 内跟上，而 0.06s 的绘制循环保持轻量。
         config = self._config()
         try:
             while not self._stop.is_set():
@@ -341,6 +343,23 @@ class RegionBoxOverlay:
                 now = time.time()
                 if now >= next_panel_check:
                     next_panel_check = now + self._refresh_seconds
+                    # 屏幕尺寸变化（对局中改分辨率）：重建 DIB 并随
+                    # UpdateLayeredWindow 调整窗口，框才能铺满新桌面。
+                    new_size = self._screen_size()
+                    if (new_size != (width, height)
+                            and new_size[0] > 0 and new_size[1] > 0):
+                        width, height = new_size
+                        GDI32.DeleteObject(dib)
+                        hdc = USER32.GetDC(None)
+                        info.bmiHeader.biWidth = width
+                        info.bmiHeader.biHeight = -height
+                        dib = GDI32.CreateDIBSection(
+                            hdc, ctypes.byref(info), 0,
+                            ctypes.byref(bits), None, 0)
+                        GDI32.SelectObject(mem_dc, dib)
+                        USER32.ReleaseDC(None, hdc)
+                        size = wintypes.SIZE(width, height)
+                    config = self._config()
                     panel_state = self._panel_state(config)
                 layer = paint_layer(width, height, panel_state, config)
                 # UpdateLayeredWindow 要的是 BGRA 字节序（PIL 的 RGBA 直接

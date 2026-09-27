@@ -8,7 +8,7 @@
 
 每一项给三种结论，页面/控制台上直接显示图标：
     ✅ ok    达标；
-    ⚠️ warn  能跑，但与推荐值不一致（例如依赖版本和 requirements.txt 不同、
+    ⚠️ warn  能跑，但与推荐值不一致（例如依赖版本和 pyproject.toml 不同、
              炉石没开、日志目录里还没有 Power.log）；
     ❌ fail  必需项缺失/不满足，脚本很可能跑不起来或点了没反应，必须修。
 
@@ -31,8 +31,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Optional
 
+# 纯标准库项目模块（无第三方依赖），用于 DPI 参考值常量。
+import layout
+
 ROOT = Path(__file__).resolve().parent
-REQUIREMENTS_PATH = ROOT / "requirements.txt"
+PYPROJECT_PATH = ROOT / "pyproject.toml"
+REQUIREMENTS_PATH = ROOT / "requirements.txt"  # 旧版兼容回退（uv 迁移前）
 UI_CONFIG_PATH = ROOT / "ui_config.json"
 
 # ---------------------------------------------------------------- 结论常量
@@ -44,8 +48,9 @@ STATUS_ICON = {STATUS_OK: "✅", STATUS_WARN: "⚠️", STATUS_FAIL: "❌"}
 # ---------------------------------------------------------------- Python 版本
 EXPECTED_PYTHON = (3, 12)
 PYTHON_HINT = (
-    "请装 Python 3.12（64 位）：conda create -n HTL python=3.12 -y && "
-    "conda activate HTL，再执行 pip install -r requirements.txt。"
+    "安装 uv（PowerShell：powershell -c \"irm https://astral.sh/uv/install.ps1 | iex\"），"
+    "然后在项目根目录以管理员身份运行 uv run web_ui.py：首次会自动装好 "
+    "Python 3.12 与全部依赖，无需手动配虚拟环境。"
     "不要用 3.11 及以下，也不要用 3.13 及以上（OCR 依赖没有对应轮子）。")
 
 # ---------------------------------------------------------------- 依赖清单
@@ -76,6 +81,9 @@ DEPENDENCIES: tuple[dict, ...] = (
 
 _PIN_RE = re.compile(r"^\s*([A-Za-z0-9][A-Za-z0-9._-]*)\s*==\s*([^\s;]+)")
 
+# 依赖修复的统一命令：uv 按 uv.lock 一键装齐/校准（web_ui 首次 uv run 也会自动做）。
+UV_SYNC_HINT = "uv sync（项目根目录执行，按 uv.lock 一键装齐/校准依赖）"
+
 
 # ---------------------------------------------------------------- 工具函数
 def _normalize(name: str) -> str:
@@ -99,17 +107,53 @@ def _dist_version(dist_names) -> Optional[str]:
     return None
 
 
-def _requirements_pins(text: Optional[str] = None) -> dict[str, str]:
-    """解析 requirements.txt 的 ``包名==版本`` 固定值，供版本比对用。
+def _pyproject_dependency_lines() -> list[str]:
+    """读取 pyproject.toml 的 [project].dependencies（uv 依赖的单一来源）。
 
-    解析不到（文件缺失/格式变了）就返回空字典，此时只检查能不能导入，
-    不比对版本 —— 自检本身不能因为解析失败而报错。
+    py3.12 运行时用 tomllib 精确解析；旧解释器（无 tomllib）退化为从文本
+    抓 dependencies = [ ... ] 段的引号项，保证自检在任意环境都能拿到固定值。
     """
-    if text is None:
-        try:
-            text = REQUIREMENTS_PATH.read_text(encoding="utf-8")
-        except Exception:
-            return {}
+    try:
+        text = PYPROJECT_PATH.read_text(encoding="utf-8")
+    except Exception:
+        return []
+    try:
+        import tomllib
+        deps = tomllib.loads(text).get("project", {}).get("dependencies", [])
+        return [str(dep) for dep in deps]
+    except ModuleNotFoundError:
+        match = re.search(r"^dependencies\s*=\s*\[(.*?)^\]", text, re.S | re.M)
+        if not match:
+            return []
+        return re.findall(r'"([^"\n]+)"', match.group(1))
+    except Exception:
+        return []
+
+
+def _requirements_pins(text: Optional[str] = None) -> dict[str, str]:
+    """解析依赖固定值（``包名==版本``），供版本比对用。
+
+    依赖清单已迁移到 pyproject.toml（uv.lock 锁定）；显式传入 text 时按
+    纯文本解析（测试/旧 requirements.txt 兼容）。解析不到就返回空字典，
+    此时只检查能不能导入、不比对版本 —— 自检本身不能因解析失败而报错。
+    """
+    if text is not None:
+        return _parse_pin_lines(text)
+    pins: dict[str, str] = {}
+    for dep in _pyproject_dependency_lines():
+        match = _PIN_RE.match(dep)
+        if match:
+            pins[_normalize(match.group(1))] = match.group(2)
+    if pins:
+        return pins
+    try:
+        return _parse_pin_lines(REQUIREMENTS_PATH.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _parse_pin_lines(text: str) -> dict[str, str]:
+    """逐行抓 ``包名==版本``（忽略注释与无关行）。"""
     pins: dict[str, str] = {}
     for line in str(text).splitlines():
         match = _PIN_RE.match(line)
@@ -151,7 +195,7 @@ def python_item(version: Optional[tuple] = None,
 def dependency_items(importer: Callable[[str], object] = importlib.import_module,
                      version_reader: Callable[[tuple], Optional[str]] = None,
                      pins: Optional[dict[str, str]] = None) -> list[dict]:
-    """逐个 import 依赖包，并和 requirements.txt 的版本做比对。"""
+    """逐个 import 依赖包，并和 pyproject.toml 的固定版本做比对。"""
     version_reader = version_reader or _dist_version
     pins = _requirements_pins() if pins is None else pins
     items: list[dict] = []
@@ -176,14 +220,14 @@ def dependency_items(importer: Callable[[str], object] = importlib.import_module
                 items.append(_item(
                     _normalize(dists[0]), label, STATUS_FAIL,
                     f"没装 {dists[0]}（找不到发行包元数据）",
-                    ("pip install -r requirements.txt" if required else
-                     f"可选依赖，需要的话 pip install {dists[0]}"), required,
+                    ("uv sync" if required else
+                     f"可选依赖；执行 uv sync 会一并装上 {dists[0]}"), required,
                     purpose))
             elif (pinned := _pinned_version(dists, pins)) and str(version) != str(pinned):
                 items.append(_item(
                     _normalize(dists[0]), label, STATUS_WARN,
-                    f"已安装 {version}，requirements.txt 要求 {pinned}",
-                    f"pip install {dists[0]}=={pinned}", required, purpose))
+                    f"已安装 {version}，pyproject.toml 要求 {pinned}",
+                    f"执行 uv sync 校准到固定版本 {pinned}", required, purpose))
             else:
                 items.append(_item(_normalize(dists[0]), label, STATUS_OK,
                                    f"已安装 {version}", "", required, purpose))
@@ -199,9 +243,8 @@ def dependency_items(importer: Callable[[str], object] = importlib.import_module
                 error = exc
                 break
         if failed_module is not None:
-            hint = (f"pip install -r requirements.txt"
-                    if required else
-                    f"可选依赖，缺了不影响出牌；需要的话 pip install {dists[0]}")
+            hint = (UV_SYNC_HINT if required else
+                    f"可选依赖，缺了不影响出牌；uv sync 会一并装上 {dists[0]}")
             items.append(_item(
                 _normalize(dists[0]), label, STATUS_FAIL,
                 f"导入 {failed_module} 失败：{type(error).__name__}: {error}",
@@ -216,8 +259,8 @@ def dependency_items(importer: Callable[[str], object] = importlib.import_module
         elif pinned and str(version) != str(pinned):
             items.append(_item(
                 _normalize(dists[0]), label, STATUS_WARN,
-                f"已安装 {version}，requirements.txt 要求 {pinned}",
-                f"如需与实测环境一致：pip install {dists[0]}=={pinned}", required,
+                f"已安装 {version}，pyproject.toml 要求 {pinned}",
+                f"如需与实测环境一致：执行 uv sync 校准到 {pinned}", required,
                 purpose))
         else:
             items.append(_item(
@@ -241,13 +284,6 @@ def _expected_desktop_size(config) -> tuple[int, int]:
     if isinstance(size, (tuple, list)) and len(size) == 2:
         return int(size[0]), int(size[1])
     return (1920, 1080)
-
-
-def _expected_dpi(config) -> int:
-    try:
-        return int(getattr(config, "desktop_dpi", 96))
-    except Exception:
-        return 96
 
 
 def _current_screen_size() -> tuple[int, int]:
@@ -347,8 +383,47 @@ def _hearthstone_item() -> dict:
                  "没开也没关系：点「开始运行」会先拉起战网和炉石。", False, purpose)
 
 
+def _aspect_item(width: int, height: int) -> Optional[dict]:
+    """非 16:9 宽高比给 ⚠️：棋盘换算依赖“居中 + 等比”假设，未全量实测。"""
+    if not width or not height:
+        return None
+    if abs(width / height - 16 / 9) <= 0.02:
+        return None
+    return _item(
+        "aspect", "屏幕宽高比", STATUS_WARN,
+        f"{width}×{height} 不是 16:9（实验性支持）",
+        "16:9 分辨率（1920×1080 / 2560×1440 / 3840×2160…）为精确支持；"
+        "非 16:9 请用浮窗「校准」或网页「显示截图区域框」核对各框位置。",
+        False, "非 16:9 布局未全量实测")
+
+
+def _fullscreen_item() -> Optional[dict]:
+    """炉石窗口未铺满屏幕（窗口化/最大化窗口）时给 ⚠️：点击会整体错位。"""
+    try:
+        import ctypes
+        import win32gui
+        from get_screen import get_HS_hwnd
+        hwnd = int(get_HS_hwnd())
+        if not hwnd:
+            return None
+        user32 = ctypes.windll.user32
+        screen_w = int(user32.GetSystemMetrics(0))
+        screen_h = int(user32.GetSystemMetrics(1))
+        left, top, right, bottom = win32gui.GetWindowRect(hwnd)
+    except Exception:
+        return None
+    if (right - left, bottom - top) == (screen_w, screen_h):
+        return None
+    return _item(
+        "fullscreen", "炉石显示模式", STATUS_WARN,
+        f"窗口 {right - left}×{bottom - top} ≠ 屏幕 {screen_w}×{screen_h}",
+        "炉石请用「全屏」显示模式（设置 → 选项 → 显示）：窗口化/最大化窗口时"
+        "窗口与全屏画面存在偏移，所有点击会整体错位。", False,
+        "窗口模式与全屏的坐标不一致")
+
+
 def environment_items(config=None) -> list[dict]:
-    """管理员权限 / 分辨率 / 缩放 / 炉石窗口 / 日志目录 / OCR 模型。"""
+    """管理员权限 / 分辨率 / 缩放 / 宽高比 / 全屏 / 炉石窗口 / 日志 / OCR 模型。"""
     config = config if config is not None else _config_handle()
 
     if _is_admin():
@@ -363,7 +438,7 @@ def environment_items(config=None) -> list[dict]:
 
     expected_w, expected_h = _expected_desktop_size(config)
     width, height = _current_screen_size()
-    purpose = "脚本点击坐标按这个分辨率硬编码"
+    purpose = "点击坐标按配置分辨率经 layout 等比换算"
     if width == 0 and height == 0:
         screen = _item("resolution", "屏幕分辨率", STATUS_WARN, "读取失败", "",
                        False, purpose)
@@ -374,13 +449,15 @@ def environment_items(config=None) -> list[dict]:
         screen = _item(
             "resolution", "屏幕分辨率", STATUS_FAIL,
             f"{width}×{height}（要求 {expected_w}×{expected_h}）",
-            "脚本的点击坐标按 1920×1080 硬编码：请把 Windows 分辨率设为 "
-            f"{expected_w}×{expected_h}，并用炉石全屏模式（不要用最大化窗口）。",
+            "实际分辨率与配置的 desktop_size 不一致：请把 Windows 分辨率设为 "
+            f"{expected_w}×{expected_h}，或把 ui_config.json 的 desktop_size "
+            "改成实际分辨率；炉石用全屏模式（不要用最大化窗口）。",
             True, purpose)
 
-    expected_dpi = _expected_dpi(config)
+    # 与参考缩放（100%=96）对比，仅信息性：DPI 感知后任意缩放按物理像素工作。
+    expected_dpi = layout.REFERENCE_DPI
     dpi = _current_dpi()
-    purpose = "缩放不是 100% 时截图与点击会整体偏移"
+    purpose = "脚本已声明 DPI 感知，任意缩放按物理像素工作"
     if dpi == 0:
         scaling = _item("dpi", "显示缩放（DPI）", STATUS_WARN, "读取失败", "",
                         False, purpose)
@@ -389,13 +466,22 @@ def environment_items(config=None) -> list[dict]:
                         f"{dpi}（{round(dpi / 96 * 100)}%）", "", True, purpose)
     else:
         scaling = _item(
-            "dpi", "显示缩放（DPI）", STATUS_FAIL,
-            f"{dpi}（{round(dpi / 96 * 100)}%，要求 100%）",
-            "显示设置 → 缩放改成 100%：缩放不是 100% 时截图和点击都会整体偏移。",
+            "dpi", "显示缩放（DPI）", STATUS_WARN,
+            f"{dpi}（{round(dpi / 96 * 100)}%）",
+            "非 100% 缩放已支持（进程声明了 DPI 感知，坐标按物理像素换算）；"
+            "100% 是实测最充分的配置，遇到点击偏差可先改回 100% 排除变量。"
+            "另外请把炉石内的游戏分辨率设成与桌面一致（全屏、不切换显示模式）。",
             True, purpose)
 
-    return [admin, screen, scaling, _hearthstone_item(),
-            _log_dir_item(), _ocr_model_item()]
+    items = [admin, screen, scaling, _hearthstone_item(),
+             _log_dir_item(), _ocr_model_item()]
+    aspect = _aspect_item(width, height)
+    if aspect is not None:
+        items.append(aspect)
+    fullscreen = _fullscreen_item()
+    if fullscreen is not None:
+        items.append(fullscreen)
+    return items
 
 
 # ---------------------------------------------------------------- 总入口

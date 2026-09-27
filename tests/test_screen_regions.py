@@ -59,7 +59,7 @@ class RegionRegistryTests(unittest.TestCase):
         self.assertEqual((7, 200, 202, 500), box)
 
     def test_win_rate_regions_match_the_automation(self):
-        """预览画的框必须和自动投降实际截的区域一模一样。"""
+        """预览画的框必须和自动投降实际截的区域一模一样（同一来源）。"""
         import FSM_action
 
         self.assertEqual(FSM_action._AI_WIN_RATE_REGIONS[0],
@@ -72,6 +72,8 @@ class RegionRegistryTests(unittest.TestCase):
 
         self.assertEqual(3, len(points))
         self.assertIn((1090, 1070), [p["point"] for p in points])
+        # get_state 实际采样点（原登记表把 (960, 860) 误写成 (860, 960)）。
+        self.assertIn((960, 860), [p["point"] for p in points])
 
     def test_state_probe_points_are_copies(self):
         points = screen_regions.state_probe_points()
@@ -126,11 +128,39 @@ class RegionPreviewTests(unittest.TestCase):
 
         statuses = {check["key"]: check["status"] for check in result["checks"]}
         self.assertEqual("fail", statuses["resolution"])
-        self.assertEqual("fail", statuses["dpi"])
+        # 非 100% 缩放已支持（DPI 感知），降级为提示而非失败
+        self.assertEqual("warn", statuses["dpi"])
         self.assertFalse(result["ok"])
         resolution = next(c for c in result["checks"]
                           if c["key"] == "resolution")
         self.assertIn("1920×1080", resolution["hint"])
+
+    def test_other_169_resolution_passes_when_configured(self):
+        """2560×1440 全屏：配置了对应 desktop_size 就不再判分辨率失败。"""
+        config = make_config(desktop_size=(2560, 1440))
+        result = self.preview(
+            config=config,
+            grabber=make_grabber(size=(2560, 1440)),
+            screen_metrics=lambda: (2560, 1440, 96))
+
+        statuses = {check["key"]: check["status"] for check in result["checks"]}
+        self.assertEqual("ok", statuses["resolution"])
+        self.assertEqual("ok", statuses["dpi"])
+        self.assertNotIn("aspect", statuses)
+        self.assertTrue(result["ok"])
+
+    def test_non_169_aspect_ratio_warns_but_does_not_fail(self):
+        """16:10 等非 16:9 为实验性支持：给 ⚠️，不拦截运行。"""
+        config = make_config(desktop_size=(1920, 1200))
+        result = self.preview(
+            config=config,
+            grabber=make_grabber(size=(1920, 1200)),
+            screen_metrics=lambda: (1920, 1200, 96))
+
+        statuses = {check["key"]: check["status"] for check in result["checks"]}
+        self.assertEqual("ok", statuses["resolution"])
+        self.assertEqual("warn", statuses["aspect"])
+        self.assertTrue(result["ok"])
 
     def test_region_outside_the_screen_is_flagged(self):
         result = self.preview(config=make_config(

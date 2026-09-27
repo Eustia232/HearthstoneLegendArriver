@@ -6,13 +6,15 @@ Web 控制台「🎯 校准 / 截图区域框」卡片里的 [显示截图区域
 截图区域画成彩色框、状态判定点画成十字准星，直接把图返回给浏览器显示。
 
 用户据此一眼确认三件事：
-    1. 分辨率 / 缩放对不对——框的整体位置和整屏大小是否和 1920×1080 吻合；
+    1. 分辨率 / 缩放对不对——配置分辨率是否与实际屏幕一致、缩放是否 100%
+       （点击坐标会按配置分辨率经 layout 等比换算）；
     2. 盒子 UI 有没有摆正——盒子的「打法参考A」面板是否正好落在绿框
        （推荐区域 recommendation_roi）里；
     3. 换牌「确认」按钮、AI胜率浮动条这些区域有没有对偏。
 
 整个过程只截屏，不点击、不移动鼠标，自动化运行中也能安全使用。
-区域坐标全部来自 config.py（用户可在 ui_config.json 覆盖），
+推荐/确认区域坐标来自 config.py（用户可在 ui_config.json 覆盖），
+胜率区域与阶段判定点与 FSM_action / get_screen 同源（config / layout），
 本模块不重复定义，避免「预览画的和实际截的不是同一个框」。
 """
 from __future__ import annotations
@@ -23,23 +25,19 @@ import time
 from datetime import datetime
 from typing import Callable, Optional
 
+import config as _config
+import layout
 from selfcheck import STATUS_FAIL, STATUS_OK, STATUS_WARN
 
-# 盒子浮动条「AI胜率 X%」的截图区域，必须与 FSM_action._AI_WIN_RATE_REGIONS
-# 一致（test_screen_regions.py 会导入 FSM_action 校验，防止两边改岔）。
-AI_WIN_RATE_REGION = (110, 8, 270, 48)
-AI_WIN_RATE_WIDE_REGION = (95, 0, 300, 60)
+# 盒子浮动条「AI胜率 X%」的检测区域：唯一来源 config.win_rate_regions()
+# （默认 1920×1080 实测值登记在 layout，可在 ui_config.json 覆盖）。
+# FSM_action 与本表共用同一来源，test_screen_regions.py 校验两边一致。
+AI_WIN_RATE_REGION, AI_WIN_RATE_WIDE_REGION = _config.win_rate_regions()
 
-# get_screen.get_state() 直接读这几个像素来判断当前阶段（屏幕坐标 x, y）。
-# 它们不是区域而是单点，所以画成十字准星：位置偏了状态识别就会错。
-STATE_PROBE_POINTS = (
-    {"key": "probe_main", "label": "主界面/选英雄/匹配判定点",
-     "point": (1090, 1070)},
-    {"key": "probe_main_alt", "label": "主界面判定点（备用）",
-     "point": (705, 305)},
-    {"key": "probe_mulligan", "label": "选牌界面判定点",
-     "point": (860, 960)},
-)
+# get_screen.get_state() 采样的阶段判定点（1920×1080 参考坐标，登记在
+# layout.STATE_PROBE_POINTS；get_state 经 layout 换算到当前分辨率，两边
+# 天然同源）。它们不是区域而是单点，所以画成十字准星：位置偏了状态识别就会错。
+STATE_PROBE_POINTS = layout.STATE_PROBE_POINTS
 
 _FONT_CANDIDATES = (r"C:\Windows\Fonts\msyh.ttc", r"C:\Windows\Fonts\msyh.ttf",
                     r"C:\Windows\Fonts\simhei.ttf", r"C:\Windows\Fonts\simsun.ttc")
@@ -67,6 +65,7 @@ def _box(value, fallback):
 def screenshot_regions(config=None) -> list[dict]:
     """脚本所有截图区域（区域框预览与文档共同的唯一来源）。"""
     cfg = config if config is not None else _default_config()
+    win_rate_main, win_rate_wide = _config.win_rate_regions()
     return [
         {"key": "recommendation", "color": "#63c76f",
          "label": "盒子推荐面板（OCR 识别来源）",
@@ -78,11 +77,11 @@ def screenshot_regions(config=None) -> list[dict]:
          "note": "换牌阶段用来确认按钮是否已经消失（还在=没提交成功，要重试）"},
         {"key": "win_rate", "color": "#e2a84e",
          "label": "盒子「AI胜率」浮动条",
-         "box": AI_WIN_RATE_REGION,
+         "box": win_rate_main,
          "note": "开了自动投降才用得到：靠它读左上角 AI胜率"},
         {"key": "win_rate_wide", "color": "#e2705f",
          "label": "AI胜率兜底区域",
-         "box": AI_WIN_RATE_WIDE_REGION,
+         "box": win_rate_wide,
          # 兜底区域完全包住主区域，所以画细一点、标签放框下面，避免和上面重叠。
          "width": 1, "label_below": True,
          "note": "主区域读不到时放宽再读一次，偏一点也能兜住"},
@@ -90,9 +89,14 @@ def screenshot_regions(config=None) -> list[dict]:
 
 
 def state_probe_points() -> list[dict]:
-    """阶段判定的像素点（复制一份，调用方改动不影响模块常量）。"""
-    return [{"key": p["key"], "label": p["label"], "point": tuple(p["point"])}
-            for p in STATE_PROBE_POINTS]
+    """阶段判定的像素点（已换算到当前分辨率；复制一份，调用方改动不影响源头）。
+
+    1920×1080 全屏时与参考坐标一致；其他分辨率经 layout 等比换算，
+    保证画出来的十字准星就是 get_state 实际采样的位置。
+    """
+    return [{"key": p["key"], "label": p["label"],
+             "point": layout.map_point(*p["point"])}
+            for p in layout.STATE_PROBE_POINTS]
 
 
 # ---------------------------------------------------------------- 截屏 / 度量
@@ -148,19 +152,15 @@ def _check(key: str, label: str, status: str, detail: str,
             "hint": hint, "required": bool(required)}
 
 
-def _expected(config) -> tuple[int, int, int]:
+def _expected(config) -> tuple[int, int]:
     if config is None:
-        return (1920, 1080, 96)
+        return (1920, 1080)
     size = getattr(config, "desktop_size", (1920, 1080))
     try:
         width, height = int(size[0]), int(size[1])
     except Exception:
         width, height = 1920, 1080
-    try:
-        dpi = int(getattr(config, "desktop_dpi", 96))
-    except Exception:
-        dpi = 96
-    return width, height, dpi
+    return width, height
 
 
 # ---------------------------------------------------------------- 预览图
@@ -258,7 +258,7 @@ def build_region_preview(config=None, grabber: Optional[Callable] = None,
     image = image.convert("RGB")
     actual_width, actual_height = image.size
 
-    expected_width, expected_height, expected_dpi = _expected(config)
+    expected_width, expected_height = _expected(config)
     screen_width, screen_height, dpi = 0, 0, 0
     try:
         screen_width, screen_height, dpi = screen_metrics()
@@ -287,17 +287,28 @@ def build_region_preview(config=None, grabber: Optional[Callable] = None,
         checks.append(_check(
             "resolution", "屏幕分辨率", STATUS_FAIL,
             f"{actual_width}×{actual_height}（要求 {expected_width}×{expected_height}）",
-            "脚本的点击坐标按 1920×1080 硬编码：请把 Windows 分辨率设为 "
-            f"{expected_width}×{expected_height}，炉石用全屏模式（别用最大化窗口）。"))
+            "截图尺寸与配置的 desktop_size 不一致：请把 Windows 分辨率设为 "
+            f"{expected_width}×{expected_height}，或把 ui_config.json 的 "
+            "desktop_size 改成实际分辨率；炉石用全屏模式（别用最大化窗口）。"))
+    # 非 16:9 宽高比为实验性支持：棋盘居中假设未在所有布局实测过。
+    if actual_width and actual_height and abs(
+            actual_width / actual_height - 16 / 9) > 0.02:
+        checks.append(_check(
+            "aspect", "屏幕宽高比", STATUS_WARN,
+            f"{actual_width}×{actual_height} 不是 16:9（实验性支持）",
+            "非 16:9 分辨率下棋盘按“居中 + 等比”假设换算："
+            "请用浮窗「校准」或区域框预览核对各框位置是否正确。",
+            required=False))
     if dpi:
-        if dpi == expected_dpi:
+        if dpi == layout.REFERENCE_DPI:
             checks.append(_check("dpi", "显示缩放（DPI）", STATUS_OK,
                                  f"{dpi}（{round(dpi / 96 * 100)}%）"))
         else:
             checks.append(_check(
-                "dpi", "显示缩放（DPI）", STATUS_FAIL,
-                f"{dpi}（{round(dpi / 96 * 100)}%，要求 100%）",
-                "显示设置 → 缩放改成 100%：不是 100% 时截图和点击会整体偏移。"))
+                "dpi", "显示缩放（DPI）", STATUS_WARN,
+                f"{dpi}（{round(dpi / 96 * 100)}%）",
+                "非 100% 缩放已支持（进程声明了 DPI 感知，坐标按物理像素换算）；"
+                "100% 是实测最充分的配置。"))
 
     # --- 逐个区域：是否在屏幕内 + 画框
     regions = draw_region_boxes(image, config, scale=scale)
