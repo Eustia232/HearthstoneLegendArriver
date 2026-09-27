@@ -595,8 +595,13 @@ def save_png(img: np.ndarray | None, path: Path) -> str | None:
     if img is None:
         return None
     from PIL import Image
-    Image.fromarray(img[:, :, ::-1]).save(path)  # BGR→RGB
-    return str(path)
+    try:
+        Image.fromarray(img[:, :, ::-1]).save(path)  # BGR→RGB
+        return str(path)
+    except OSError as exc:
+        # 实机曾出现探针中途 cwd 失效导致 Errno 22：存图失败只警告，不让探针崩掉
+        print(f"[WARN] 截图保存失败（{path}）：{exc} —— 继续探针，缺图不影响判定")
+        return None
 
 
 def client_to_screen_pt(hwnd: int, x: int, y: int) -> tuple[int, int]:
@@ -1070,7 +1075,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", default="probe_out", help="输出目录")
     args = parser.parse_args(argv)
 
-    out_dir = Path(args.out)
+    # 固定为绝对路径：即使探针运行中终端 cwd 失效（实机踩过 Errno 22），所有
+    # 截图与报告仍写进启动时确定的目录
+    out_dir = Path(args.out).resolve()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     hwnd = find_hs_hwnd()
